@@ -1,0 +1,174 @@
+import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import { createClaudeCompatExtension } from "../extensions/claude-compat.ts";
+import { REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
+import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
+import { claudeCompatStatePath, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
+import { agentFile, createClaudeFixture, skillFile } from "./claude-compat-fixtures.ts";
+
+type ToolCallPlan = { name: string; arguments: Record<string, unknown> };
+const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+/** Offline provider: issues the planned tool calls, then records the tool results it receives. */
+async function offlineRuntime(agentHome: string, plan: ToolCallPlan[], results: Array<{ name: string; text: string; isError: boolean }>) {
+	const runtime = await ModelRuntime.create({ authPath: join(agentHome, "offline-auth.json"), modelsPath: null, refreshOnCreate: false });
+	let turn = 0;
+	runtime.registerProvider("offline-compat", {
+		api: "offline-compat-test", apiKey: "offline-dummy", baseUrl: "http://offline.invalid",
+		models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 100000, maxTokens: 1000 }],
+		streamSimple(model, context) {
+			for (const message of context.messages) {
+				if (message.role === "toolResult" && !results.some((result) => result.name === `${message.toolCallId}`)) {
+					results.push({ name: message.toolCallId, text: message.content.map((part) => part.type === "text" ? part.text : "").join(""), isError: message.isError });
+				}
+			}
+			const stream = createAssistantMessageEventStream();
+			const calls = turn++ === 0 ? plan : [];
+			const message: AssistantMessage = {
+				role: "assistant", api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), usage,
+				content: (calls.length > 0 ? calls.map((call, index) => ({ type: "toolCall" as const, id: `${call.name}-${index}`, name: call.name, arguments: call.arguments })) : [{ type: "text" as const, text: "done" }]) as AssistantMessage["content"],
+				stopReason: calls.length > 0 ? "toolUse" : "stop",
+			};
+			queueMicrotask(() => { stream.push({ type: "start", partial: message }); stream.push({ type: "done", reason: message.stopReason as "stop", message }); stream.end(); });
+			return stream;
+		},
+	});
+	return runtime;
+}
+
+async function startSession(options: { root: string; agentHome: string; env: NodeJS.ProcessEnv; home: string; configHome: string; tools: string[]; plan: ToolCallPlan[] }) {
+	const results: Array<{ name: string; text: string; isError: boolean }> = [];
+	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const runtime = await offlineRuntime(options.agentHome, options.plan, results);
+	const loader = new DefaultResourceLoader({ cwd: options.root, agentDir: options.agentHome, settingsManager, noExtensions: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+		extensionFactories: [createClaudeCompatExtension({ env: options.env, home: options.home, agentHome: options.agentHome, configHome: options.configHome })] });
+	await loader.reload();
+	const { session } = await createAgentSession({ cwd: options.root, agentDir: options.agentHome, modelRuntime: runtime, model: runtime.getModel("offline-compat", "fixture")!, resourceLoader: loader, settingsManager, sessionManager: SessionManager.inMemory(), tools: options.tools });
+	await session.bindExtensions({ mode: "json" });
+	return { session, loader, results };
+}
+
+test("real Pi session: an imported agent's child is held to its allowlist and Bash patterns", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "agents/auditor.md": agentFile({ name: "auditor", description: "Audits", tools: "Read, Bash(git status)" }) } });
+		fixture.finalize();
+		const state = synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		const [policy] = state.policies;
+		writeFileSync(join(fixture.root, "notes.txt"), "readable");
+		const env = { GENTLE_PI_AGENTS_CHILD: "1", [REQUESTED_TOOLS_ENV]: policy.tools.join(",") };
+		const { session, results } = await startSession({ ...fixture, env, tools: ["read", "bash", "write"], plan: [
+			{ name: "bash", arguments: { command: "git push --force" } },
+			{ name: "bash", arguments: { command: "git status && rm -rf data" } },
+			{ name: "write", arguments: { path: join(fixture.root, "x.txt"), content: "x" } },
+			{ name: "read", arguments: { path: join(fixture.root, "notes.txt") } },
+		] });
+		try {
+			await session.prompt("Audit the repository.");
+			const byId = Object.fromEntries(results.map((result) => [result.name, result]));
+			assert.match(byId["bash-0"].text, /claude-compat: comando fuera de la allowlist/);
+			assert.match(byId["bash-1"].text, /claude-compat: orden restringida rechazada/);
+			assert.match(byId["write-2"].text, /claude-compat: herramienta write fuera de la allowlist/);
+			assert.equal(byId["read-3"].isError, false);
+			assert.match(byId["read-3"].text, /readable/);
+		} finally { session.dispose(); }
+	} finally { fixture.dispose(); }
+});
+
+test("real Pi session: an unreadable import blocks imported children instead of leaving them open", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		mkdirSync(join(fixture.agentHome, "claude-import"), { recursive: true });
+		writeFileSync(claudeCompatStatePath(fixture.agentHome), "{ corrupt");
+		writeFileSync(join(fixture.root, "notes.txt"), "readable");
+		const env = { GENTLE_PI_AGENTS_CHILD: "1", [REQUESTED_TOOLS_ENV]: "read,claude_policy_sample_auditor" };
+		const { session, results } = await startSession({ ...fixture, env, tools: ["read"], plan: [{ name: "read", arguments: { path: join(fixture.root, "notes.txt") } }] });
+		try {
+			await session.prompt("Read.");
+			assert.match(results[0].text, /claude-compat: política de agente importado desconocida/);
+		} finally { session.dispose(); }
+		const plain = await startSession({ ...fixture, env: { GENTLE_PI_AGENTS_CHILD: "1", [REQUESTED_TOOLS_ENV]: "read" }, tools: ["read"], plan: [{ name: "read", arguments: { path: join(fixture.root, "notes.txt") } }] });
+		try {
+			await plain.session.prompt("Read.");
+			assert.equal(plain.results[0].isError, false, "children of native agents are unaffected");
+		} finally { plain.session.dispose(); }
+	} finally { fixture.dispose(); }
+});
+
+test("real Pi loader: selected skills load through resources_discover without collisions", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "alpha@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("alpha:report"), "skills/shared/SKILL.md": skillFile("shared") } });
+		fixture.plugin({ key: "beta@market", version: "1.0.0", files: { "skills/shared/SKILL.md": skillFile("shared", "beta") } });
+		fixture.finalize();
+		synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		const { session, loader } = await startSession({ ...fixture, env: {}, tools: ["read"], plan: [] });
+		try {
+			const skills = loader.getSkills();
+			const imported = skills.skills.filter((skill) => ["alpha-report", "shared"].includes(skill.name));
+			assert.deepEqual(imported.map((skill) => skill.name).sort(), ["alpha-report", "shared"]);
+			const collisions = skills.diagnostics.filter((diagnostic) => diagnostic.type === "collision" && /alpha-report|"shared"/.test(diagnostic.message));
+			assert.deepEqual(collisions, [], "the imported catalog introduces no collision diagnostics");
+		} finally { session.dispose(); }
+	} finally { fixture.dispose(); }
+});
+
+type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown;
+function harness(env: NodeJS.ProcessEnv, fixture: ReturnType<typeof createClaudeFixture>) {
+	const handlers = new Map<string, Handler>();
+	const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
+	const pi = {
+		on: (name: string, handler: Handler) => handlers.set(name, handler),
+		registerTool() {}, getCommands: () => [],
+		registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command),
+	} as unknown as ExtensionAPI;
+	createClaudeCompatExtension({ env, home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome })(pi);
+	return { handlers, commands };
+}
+
+test("a reviewed PreToolUse hook's ask needs a fresh human confirmation and fails closed without one", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "guard@market", version: "1.0.0", files: { "hooks/ask.mjs": "process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'ask',permissionDecisionReason:'confirmar push'}}))" } });
+		fixture.finalize();
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [{ id: "ask", plugin: "guard", script: "hooks/ask.mjs", event: "PreToolUse", tools: ["Bash"] }] }));
+		synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		const event = { toolName: "bash", toolCallId: "1", input: { command: "git push" } };
+		const context = (hasUI: boolean, answer: boolean, prompts: string[]) => ({ cwd: fixture.root, hasUI, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async (title: string) => { prompts.push(title); return answer; }, notify() {} } }) as unknown as ExtensionContext;
+		const primary = harness({}, fixture).handlers.get("tool_call")!;
+		const prompts: string[] = [];
+		assert.equal(await primary(event, context(true, true, prompts)), undefined);
+		assert.equal(await primary(event, context(true, true, prompts)), undefined);
+		assert.equal(prompts.length, 2, "approval is never cached");
+		assert.equal((await primary(event, context(true, false, prompts)) as { block: boolean }).block, true);
+		assert.equal((await primary(event, context(false, true, [])) as { block: boolean }).block, true, "headless cannot confirm");
+		assert.equal(await primary({ ...event, toolName: "read", input: { path: "x" } }, context(true, false, [])), undefined, "hook matcher limits it to Bash");
+		const child = harness({ GENTLE_PI_AGENTS_CHILD: "1" }, fixture).handlers.get("tool_call")!;
+		assert.equal((await child(event, context(true, true, [])) as { block: boolean }).block, true, "children never prompt");
+	} finally { fixture.dispose(); }
+});
+
+test("sync and status commands report the import; children get no import commands", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report") } });
+		fixture.finalize();
+		const notices: Array<{ text: string; level: string }> = [];
+		let reloads = 0;
+		const context = { ui: { notify: (text: string, level: string) => notices.push({ text, level }) }, reload: async () => { reloads++; } } as unknown as ExtensionContext;
+		const { commands } = harness({}, fixture);
+		await commands.get("claude-compat:sync")!.handler("", context);
+		assert.equal(reloads, 1);
+		assert.match(notices[0].text, /sample:report → sample-report/);
+		assert.deepEqual([...harness({ GENTLE_PI_AGENTS_CHILD: "1" }, fixture).commands.keys()], []);
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), "{ broken");
+		await commands.get("claude-compat:sync")!.handler("", context);
+		assert.equal(notices[1].level, "error");
+		assert.equal(reloads, 1, "a failed import is not applied");
+	} finally { fixture.dispose(); }
+});
