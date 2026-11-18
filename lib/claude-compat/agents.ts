@@ -141,7 +141,22 @@ export function applyDisallowedTools(declared: readonly string[], denied: readon
 		if (rule.includes("*")) throw unrepresentableDenial(rule, "comodines");
 		remove((tool) => tool === rule || TOOL_RULE_PATTERN.exec(tool)?.[1].trim() === rule);
 	}
+	// Several Claude tools collapse to one Pi tool (Read/Skill → read,
+	// Edit/MultiEdit → edit): a denial only holds if no surviving alias still
+	// grants the same Pi tool.
+	const grantedPiTools = new Set(translateTools(allowed).tools);
+	for (const rule of denied) {
+		if (rule.startsWith(MCP_TOOL_PREFIX)) continue;
+		const deniedPiTool = deniedPiToolOf(rule);
+		if (deniedPiTool && grantedPiTools.has(deniedPiTool)) throw unrepresentableDenial(rule, `otra tool permitida sigue concediendo ${deniedPiTool} en Pi`);
+	}
 	return { allowed, removed };
+}
+
+/** Pi tool a non-MCP `disallowedTools` rule (plain or scoped) targets, if any. */
+function deniedPiToolOf(rule: string): string | undefined {
+	const baseName = TOOL_RULE_PATTERN.exec(rule)?.[1].trim() ?? rule;
+	return baseName === CLAUDE_BASH_TOOL ? PI_BASH_TOOL : CLAUDE_TOOL_EQUIVALENTS[baseName];
 }
 
 function compatibilityNotice(owner: string, sourceName: string, root: string, policy: AgentPolicy, omitted: readonly string[]): string {

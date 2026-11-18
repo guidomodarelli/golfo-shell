@@ -246,6 +246,32 @@ test("disallowedTools removes denied tools from the allowlist and rejects denial
 	} finally { fixture.dispose(); }
 });
 
+test("disallowedTools rejects a denial that another Claude alias of the same Pi tool keeps reachable", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"agents/skill-reader.md": agentFile({ name: "skill-reader", description: "Reads via Skill", tools: "Read, Skill", disallowedTools: "Read" }),
+			"agents/multi-editor.md": agentFile({ name: "multi-editor", description: "Edits via MultiEdit", tools: "Edit, MultiEdit", disallowedTools: "Edit" }),
+			"agents/scoped-skill.md": agentFile({ name: "scoped-skill", description: "Scoped read denial", tools: "Skill", disallowedTools: "Read(/secret/**)" }),
+			"agents/no-read.md": agentFile({ name: "no-read", description: "Denies every read alias", tools: "Read, Skill, Grep", disallowedTools: "Read, Skill" }),
+		} });
+		fixture.finalize();
+		const state = sync(fixture);
+		const importedNames = state.policies.map((policy) => policy.name);
+		for (const rejected of ["claude-sample-skill-reader", "claude-sample-multi-editor", "claude-sample-scoped-skill"]) {
+			assert.equal(importedNames.includes(rejected), false, `${rejected} must be rejected`);
+			assert.equal(existsSync(join(fixture.agentHome, "agents", `${rejected}.md`)), false);
+		}
+		const reasons = state.agentErrors.map((error) => error.reason);
+		assert.ok(reasons.some((reason) => /disallowedTools: Read no se puede representar con seguridad \(otra tool permitida sigue concediendo read en Pi\); requiere adaptación manual/.test(reason)));
+		assert.ok(reasons.some((reason) => /disallowedTools: Edit no se puede representar con seguridad \(otra tool permitida sigue concediendo edit en Pi\)/.test(reason)));
+		assert.ok(reasons.some((reason) => /disallowedTools: Read\(\/secret\/\*\*\) no se puede representar con seguridad/.test(reason)));
+		const noRead = state.policies.find((policy) => policy.name === "claude-sample-no-read")!;
+		assert.deepEqual(noRead.tools.sort(), ["claude_policy_sample_no_read", "grep", "subagent_parent_message"]);
+		assert.throws(() => enforceAgentPolicy(noRead, "read", {}), PolicyViolation);
+	} finally { fixture.dispose(); }
+});
+
 test("frontmatter drops YAML comments but keeps literal # inside quotes, words and block scalars", () => {
 	const { fields } = readFrontmatter([
 		"---",
