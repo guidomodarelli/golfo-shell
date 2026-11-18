@@ -42,7 +42,7 @@ Una entrada de `skillOverrides` en `~/.claude/settings.json` con valor exacto `"
 { "skillOverrides": { "sample:report": "off" } }
 ```
 
-- La clave puede ser el nombre original (`sample:report`) o el portable normalizado (`sample-report`).
+- La clave puede ser el nombre declarado, su forma portable normalizada o, en skills de plugins, el nombre con el prefijo del plugin que muestra Claude Code: una skill `report` del plugin `sample` se desactiva con `sample:report` o `sample-report` (el prefijo no se duplica si el nombre ya lo trae). Las skills de `~/.claude/skills` no llevan prefijo.
 - El filtro se aplica a cada candidata **antes** de elegir ganadores o escribir copias: ninguna versión anterior del plugin, duplicado de otro plugin ni copia en `~/.claude/skills` la reintroduce. Las demás skills del plugin siguen disponibles; el plugin no se deshabilita.
 - Cualquier otro valor, un objeto vacío o la ausencia del campo no cambian la selección.
 - Tras marcarla y ejecutar `/claude-compat:sync`, la skill deja de publicarse por `resources_discover` y su copia derivada intacta se retira (una editada a mano se conserva, como siempre). Quitar la entrada y sincronizar de nuevo la restaura sin reinstalar el plugin.

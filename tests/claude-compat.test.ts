@@ -547,6 +547,24 @@ test("skillOverrides \"off\" also matches the normalized portable name", () => {
 	} finally { fixture.dispose(); }
 });
 
+test("skillOverrides \"off\" matches the plugin-qualified name Claude Code shows, without prefixing it twice", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"skills/report/SKILL.md": skillFile("report"),
+			"skills/audit/SKILL.md": "---\ndescription: Audits without a declared name\n---\n\nAudit.\n",
+			"skills/deploy/SKILL.md": skillFile("deploy"),
+			"skills/prefixed/SKILL.md": skillFile("sample:prefixed"),
+			"skills/kept/SKILL.md": skillFile("kept"),
+		} });
+		fixture.write("home/.claude/skills/personal/SKILL.md", skillFile("personal"));
+		fixture.finalize({ skillOverrides: { "sample:report": "off", "sample:audit": "off", "sample-deploy": "off", "sample:prefixed": "off", "sample:sample:kept": "off", "sample:personal": "off" } });
+		const state = sync(fixture);
+		assert.deepEqual(state.skills.map((skill) => skill.name).sort(), ["kept", "personal"], "user skills are not namespaced and a doubled prefix matches nothing");
+		assert.deepEqual(state.disabledSkills?.map((skill) => skill.override).sort(), ["sample-deploy", "sample:audit", "sample:prefixed", "sample:report"]);
+	} finally { fixture.dispose(); }
+});
+
 test("skillOverrides without an exact \"off\" keeps the current selection", () => {
 	for (const skillOverrides of [undefined, {}, { "sample:report": "on" }, { "sample:report": "OFF" }, { "sample:report": false }, { "sample-report": "user-invocable-only" }, ["sample:report"], "off"]) {
 		const fixture = createClaudeFixture();

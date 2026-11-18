@@ -49,6 +49,8 @@ interface SkillCandidate {
 	file: string;
 	owner: string;
 	root: string;
+	/** Plugin name Claude Code prefixes to the skill (`<plugin>:<skill>`); absent for user skills. */
+	pluginName?: string;
 }
 
 /**
@@ -79,7 +81,7 @@ function pluginSkillFiles(plugin: ClaudePlugin): string[] {
  */
 export function skillCandidates(home: string, plugins: readonly ClaudePlugin[]): SkillCandidate[] {
 	const candidates: SkillCandidate[] = [];
-	for (const plugin of plugins) candidates.push(...pluginSkillFiles(plugin).map((file) => ({ file, owner: plugin.key, root: plugin.root })));
+	for (const plugin of plugins) candidates.push(...pluginSkillFiles(plugin).map((file) => ({ file, owner: plugin.key, root: plugin.root, pluginName: plugin.name })));
 	const userRoot = join(claudeDirectory(home), "skills");
 	candidates.push(...findMarkdownFiles(userRoot, SKILL_FILE_NAME).map((file) => ({ file, owner: USER_SKILL_OWNER, root: userRoot })));
 	return candidates;
@@ -114,6 +116,20 @@ function renameFrontmatter(content: string, name: string): string {
 	const [whole, opening, yaml, closing] = block;
 	const renamedYaml = FRONTMATTER_NAME_LINE_PATTERN.test(yaml) ? yaml.replace(FRONTMATTER_NAME_LINE_PATTERN, `$1${name}`) : `name: ${name}\n${yaml}`;
 	return `${opening}${renamedYaml}${closing}${content.slice(whole.length)}`;
+}
+
+/**
+ * Names an override may use for a candidate: the declared one, its portable
+ * form and, for plugin skills, the `<plugin>:<skill>` name Claude Code shows
+ * (never prefixed twice) with its portable form.
+ */
+function overrideNames(sourceName: string, name: string | undefined, pluginName: string | undefined): string[] {
+	const names = [sourceName, name];
+	if (pluginName && !sourceName.startsWith(`${pluginName}:`)) {
+		const qualified = `${pluginName}:${sourceName}`;
+		names.push(qualified, normalizeSkillName(qualified));
+	}
+	return names.filter((candidateName): candidateName is string => candidateName !== undefined);
 }
 
 function hasPluginRootPlaceholder(content: string): boolean {
@@ -160,7 +176,7 @@ export function buildSkillCatalog(options: {
 		if (!present || !fields.description?.trim()) { skipped.push({ file: candidate.file, reason: "sin frontmatter con description" }); continue; }
 		const sourceName = fields.name?.trim() || basename(dirname(candidate.file));
 		const name = normalizeSkillName(sourceName);
-		const override = [sourceName, name].find((candidateName) => candidateName !== undefined && disabledNames.has(candidateName));
+		const override = overrideNames(sourceName, name, candidate.pluginName).find((candidateName) => disabledNames.has(candidateName));
 		if (override !== undefined) { disabled.push({ override, file: candidate.file }); continue; }
 		if (!name) { skipped.push({ file: candidate.file, reason: `nombre sin adaptación portable: ${sourceName}` }); continue; }
 		if (options.nativeSkillNames.has(name)) { duplicates.push({ name, selected: "pi-native", excluded: candidate.file }); continue; }
