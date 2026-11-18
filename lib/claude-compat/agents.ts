@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { THINKING_LEVELS } from "../model-routing-authority.ts";
 import { type AgentPolicy, type CommandPattern, parseCommandPattern } from "./agent-policy.ts";
-import { CLAUDE_BASH_TOOL, CLAUDE_TOOL_EQUIVALENTS, FORBIDDEN_PERMISSION_MODES, INHERIT_MODEL, MANAGED_AGENT_PREFIX, MCP_SEGMENT_SEPARATOR, MCP_TOOL_PREFIX, PARENT_NOTIFICATION_TOOL, PI_BASH_TOOL, POLICY_TOOL_PREFIX } from "./constants.ts";
+import { CLAUDE_BASH_TOOL, CLAUDE_TOOL_EQUIVALENTS, FORBIDDEN_PERMISSION_MODES, INHERIT_MODEL, MANAGED_AGENT_PREFIX, MCP_SEGMENT_SEPARATOR, MCP_TOOL_DECLARATION_PATTERN, MCP_TOOL_PREFIX, PARENT_NOTIFICATION_TOOL, PI_BASH_TOOL, POLICY_TOOL_PREFIX, TOOL_DECLARATION_PATTERN } from "./constants.ts";
 import { findMarkdownFiles, isInside, type ManagedFiles, readFrontmatter, writeManagedFile } from "./files.ts";
 import { claudeDirectory, type ClaudePlugin, manifestPaths } from "./plugins.ts";
 
@@ -58,6 +58,18 @@ export function splitToolList(value: string): string[] {
 	}
 	tools.push(current);
 	return tools.map((tool) => tool.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
+}
+
+/**
+ * Splits a permission field (`tools`, `disallowedTools`) and rejects the agent
+ * when any entry is not a recognizable tool name, so a malformed declaration
+ * never silently widens or drops a permission.
+ */
+export function parsePermissionList(field: string, value: string): string[] {
+	const entries = splitToolList(value);
+	const invalid = entries.filter((entry) => !TOOL_DECLARATION_PATTERN.test(entry) && !MCP_TOOL_DECLARATION_PATTERN.test(entry));
+	if (invalid.length > 0) throw new Error(`${field}: ${invalid.map((entry) => JSON.stringify(entry.slice(0, 80))).join(", ")}: declaración de permisos no interpretable con seguridad; requiere adaptación manual`);
+	return entries;
 }
 
 /**
@@ -156,7 +168,7 @@ export function convertAgent(source: AgentSource, agentHome: string, previous: M
 	if (!fields.tools?.trim()) throw new Error("agente sin allowlist explícita de tools (en Claude Code hereda todas); requiere adaptación manual");
 	const marker = `${POLICY_TOOL_PREFIX}${identifier.replaceAll("-", "_").toLowerCase()}`;
 	if (reservedMarkers.has(marker)) throw new Error(`marker de política ${marker} ya usado por otro agente (nombres que solo difieren en '-', '_' o mayúsculas); se conserva la primera versión`);
-	const { allowed, removed } = applyDisallowedTools(splitToolList(fields.tools), splitToolList(fields.disallowedTools ?? ""));
+	const { allowed, removed } = applyDisallowedTools(parsePermissionList("tools", fields.tools), parsePermissionList("disallowedTools", fields.disallowedTools ?? ""));
 	const translated = translateTools(allowed);
 	const policy: AgentPolicy = { name, marker, ...translated, tools: [...translated.tools, marker, PARENT_NOTIFICATION_TOOL], source: source.file };
 	const omitted: string[] = [];

@@ -42,19 +42,53 @@ export interface Frontmatter {
 	present: boolean;
 }
 
-/** Simple scalar frontmatter reader: keeps the body untouched and folds `>`/`|` blocks to one line. */
+const YAML_COMMENT_MARKER = "#";
+const YAML_QUOTES = new Set(["'", "\""]);
+const BLOCK_SCALAR_PATTERN = /^[>|][+-]?$/;
+
+/**
+ * Removes a trailing YAML comment from one frontmatter value: a `#` at the
+ * start or after whitespace, outside a quoted span. Quotes only open a span at
+ * the start of a token, so apostrophes (`it's`) and `#` inside words (`C#`,
+ * `url#anchor`) stay literal.
+ */
+export function stripYamlComment(value: string): string {
+	let quote: string | undefined;
+	for (let index = 0; index < value.length; index++) {
+		const character = value[index];
+		const previous = index > 0 ? value[index - 1] : " ";
+		if (quote) {
+			if (quote === "\"" && character === "\\") { index++; continue; }
+			if (character === quote) {
+				if (quote === "'" && value[index + 1] === "'") { index++; continue; }
+				quote = undefined;
+			}
+			continue;
+		}
+		if (YAML_QUOTES.has(character) && /[\s[(,:]/.test(previous)) { quote = character; continue; }
+		if (character === YAML_COMMENT_MARKER && /\s/.test(previous)) return value.slice(0, index).trimEnd();
+	}
+	return value;
+}
+
+/** Simple scalar frontmatter reader: keeps the body untouched, drops YAML comments and folds `>`/`|` blocks to one line. */
 export function readFrontmatter(text: string): Frontmatter {
 	const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
 	if (!match) return { fields: {}, body: text, present: false };
 	const fields: Record<string, string> = {};
 	let currentKey: string | undefined;
+	let inBlockScalar = false;
 	for (const line of match[1].split(/\r?\n/)) {
 		const pair = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line);
 		if (pair) {
 			currentKey = pair[1];
-			fields[currentKey] = pair[2].trim().replace(/^(['"])([\s\S]*)\1$/, "$2");
+			const value = stripYamlComment(pair[2]).trim();
+			inBlockScalar = BLOCK_SCALAR_PATTERN.test(value);
+			fields[currentKey] = value.replace(/^(['"])([\s\S]*)\1$/, "$2");
 		} else if (currentKey && /^\s+\S/.test(line)) {
-			fields[currentKey] += `\n${line.trim()}`;
+			// Inside `>`/`|` blocks a `#` is content; elsewhere comment lines are skipped.
+			const continuation = inBlockScalar ? line.trim() : stripYamlComment(line.trim());
+			if (continuation) fields[currentKey] += `\n${continuation}`;
 		}
 	}
 	for (const [key, value] of Object.entries(fields)) {

@@ -62,6 +62,10 @@ export const PI_BASH_TOOL = "bash";
 export const MCP_TOOL_PREFIX = "mcp__";
 /** Separator between the MCP server and tool segments. */
 export const MCP_SEGMENT_SEPARATOR = "__";
+/** Grammar of one `tools`/`disallowedTools` entry: `Name` or `Name(rule)`. */
+export const TOOL_DECLARATION_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\(.*\))?$/s;
+/** Grammar of one MCP entry (`mcp__<server>[__<tool>]`); wildcards are judged later. */
+export const MCP_TOOL_DECLARATION_PATTERN = /^mcp__\S+$/;
 
 /**
  * Conservative grammar for `Bash(pattern)` commands: one argv, no quoting,

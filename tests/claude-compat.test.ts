@@ -6,6 +6,7 @@ import { assertRestrictedCommand, enforceAgentPolicy, parseCommandPattern, Polic
 import { splitToolList, translateTools } from "../lib/claude-compat/agents.ts";
 import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
+import { readFrontmatter } from "../lib/claude-compat/files.ts";
 import { callReviewedHook, decodeHookResult, hookAppliesToTool, translateToolInput } from "../lib/claude-compat/hooks.ts";
 import { runProcess } from "../lib/claude-compat/process.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
@@ -242,6 +243,55 @@ test("disallowedTools removes denied tools from the allowlist and rejects denial
 		assert.ok(reasons.some((reason) => /Bash\(git push\) no se puede representar con seguridad.*requiere adaptación manual/.test(reason)));
 		assert.ok(reasons.some((reason) => /mcp__docs__\* no se puede representar con seguridad/.test(reason)));
 		assert.equal(existsSync(join(fixture.agentHome, "agents", "claude-sample-pusher.md")), false);
+	} finally { fixture.dispose(); }
+});
+
+test("frontmatter drops YAML comments but keeps literal # inside quotes, words and block scalars", () => {
+	const { fields } = readFrontmatter([
+		"---",
+		"# leading comment line",
+		"description: \"use C# # ok\" # real comment",
+		"summary: Knows C# and https://example.com/a#anchor # note",
+		"quote: it's fine # note",
+		"empty: # only a comment",
+		"tools:",
+		"  - Read # reader",
+		"  # whole comment line",
+		"  - Grep",
+		"notes: |",
+		"  # heading kept",
+		"---",
+		"Body # not frontmatter",
+	].join("\n"));
+	assert.equal(fields.description, "use C# # ok");
+	assert.equal(fields.summary, "Knows C# and https://example.com/a#anchor");
+	assert.equal(fields.quote, "it's fine");
+	assert.equal(fields.empty, "");
+	assert.equal(fields.tools, "Read, Grep");
+	assert.equal(fields.notes, "# heading kept");
+});
+
+test("permission fields with YAML comments are enforced and uninterpretable entries reject the agent", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"agents/reader.md": agentFile({ name: "reader", description: "Reads", tools: "Read, Write # comment", disallowedTools: "[Write] # never modify files", permissionMode: "default # comment" }),
+			"agents/listed.md": agentFile({ name: "listed", description: "Lists", tools: "\n  - Read # reader\n  # whole comment line\n  - Grep # search" }),
+			"agents/garbled.md": agentFile({ name: "garbled", description: "Garbled", tools: "Read, Wr!te" }),
+		} });
+		fixture.finalize();
+		const state = sync(fixture);
+		const reader = state.policies.find((policy) => policy.name === "claude-sample-reader")!;
+		assert.deepEqual(reader.tools.sort(), ["claude_policy_sample_reader", "read", "subagent_parent_message"]);
+		assert.deepEqual(reader.unsupported, []);
+		assert.throws(() => enforceAgentPolicy(reader, "write", {}), PolicyViolation);
+		assert.deepEqual(state.agents.find((agent) => agent.name === "claude-sample-reader")!.omitted, ["tools quitadas por disallowedTools: Write", "permissionMode: default"]);
+		const listed = state.policies.find((policy) => policy.name === "claude-sample-listed")!;
+		assert.deepEqual(listed.tools.sort(), ["claude_policy_sample_listed", "grep", "read", "subagent_parent_message"]);
+		assert.deepEqual(listed.unsupported, []);
+		assert.equal(state.policies.some((policy) => policy.name === "claude-sample-garbled"), false);
+		assert.ok(state.agentErrors.some((error) => /tools: "Wr!te": declaración de permisos no interpretable con seguridad; requiere adaptación manual/.test(error.reason)));
+		assert.equal(existsSync(join(fixture.agentHome, "agents", "claude-sample-garbled.md")), false);
 	} finally { fixture.dispose(); }
 });
 
