@@ -1949,7 +1949,7 @@ test("native Windows: complete local sentinel composes production entry and late
 		// Clone ONLY the approved available Node's unchanged bytes, not any adjacent
 		// operator npm/Corepack/pnpm shim. No new executable is built or acquired.
 		copyFileSync(process.execPath, fixtureNode);
-		for (const name of ["installer-downloads.mjs", "installer-windows.mjs", "installer-windows-artifacts.json"]) copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(scripts, name));
+		for (const name of ["installer-downloads.mjs", "installer-diagnostics.mjs", "installer-windows.mjs", "installer-windows-artifacts.json"]) copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(scripts, name));
 		// Fail-only transport guard in this trusted local JS fixture copy. It never
 		// supplies bytes/digests, relaxes integrity or creates a production switch.
 		const helper = join(scripts, "installer-downloads.mjs");

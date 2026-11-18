@@ -202,6 +202,7 @@ test("required package paths include every browser installation wizard file", ()
 		"scripts/installer-preflight.mjs",
 		"scripts/installer-probes.mjs",
 		"scripts/installer-downloads.mjs",
+		"scripts/installer-diagnostics.mjs",
 		"scripts/main-channel.mjs",
 		"scripts/installer-windows.mjs",
 		"scripts/installer-windows-artifacts.json",

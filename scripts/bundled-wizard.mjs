@@ -11,6 +11,7 @@ import { DISTRIBUTION_ASSETS, activateVersion, applyPathEntry, checkLauncher, cl
 import { removeGlobalCommand, removeGlobalShell } from "./main-channel.mjs";
 import { artifactFor, download as httpDownload, goPinVersion } from "./installer-downloads.mjs";
 import { setupErrorDetail } from "./installer-runner.mjs";
+import { errorDiagnostic, redactUrls } from "./installer-diagnostics.mjs";
 import { windowsProcessCheck } from "./installer-windows.mjs";
 
 /** Where each release's distribution assets live: <base>/v<version>/<asset>. */
@@ -174,12 +175,21 @@ export async function runBundledInstall(request, adapters) {
 	const steps = [
 		["claim-prefix", () => { layout = ops.claimPrefix({ platform, env, home, root: consented.root }); }],
 		["copy-npm-settings", () => ops.writeNpmrcAuth(layout, ops.userNpmrc({ platform, env, home }))],
-		["install-runtime", async () => { runtime = await ops.ensureRuntime({ layout, platform, arch, go: platform === "win32", env }); }],
+		["install-runtime", async () => {
+			try {
+				runtime = await ops.ensureRuntime({ layout, platform, arch, go: platform === "win32", env });
+			} catch (error) {
+				// The classified download failure (artifact, version, connection/TLS/HTTP/size/integrity), never its URL.
+				detail = errorDiagnostic(error);
+				throw error;
+			}
+		}],
 		["install-version", async () => {
 			try {
 				await ops.installVersion({ layout, manifest: distribution.manifest, lockfile: distribution.lockfile, platform, env, go: runtime.go });
 			} catch (error) {
-				detail = lastLine({ stderr: error?.stderr });
+				// A classified registry failure first; otherwise pnpm's last error line, without registry URLs.
+				detail = typeof error?.diagnostic === "string" ? error.diagnostic : lastLine({ stderr: redactUrls(error?.stderr) });
 				throw error;
 			}
 		}],

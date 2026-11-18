@@ -178,6 +178,19 @@ export const guidance = Object.freeze({
 	// A failed persist-path whose detail shows pnpm could not tell the shell (POSIX SHELL missing or unsupported).
 	persistPathShell: "`pnpm setup` could not tell which shell profile to edit because the SHELL environment variable is missing or names an unsupported shell. Open a regular terminal and run the installer again, or add `$PNPM_HOME/bin` to your PATH yourself.",
 	fallback: "The installation stopped for an unexpected reason. Nothing else will run; check the terminal and run the installer again.",
+	// install-runtime and install-version failures by their classified diagnostic (installer-diagnostics).
+	runtimeUnreachable: "A pinned runtime download source could not be reached (the artifact is named below). Check your network connection and proxy. " +
+		"If only an internal npm registry is reachable, set GENTLE_SHELL_PNPM_REGISTRY to it so the pinned pnpm comes from there; its pinned checksum is still verified. Nothing was installed.",
+	runtimeRefused: "A pinned runtime download was refused (the artifact and HTTP status are shown below). " +
+		"If your network only allows an internal npm registry, set GENTLE_SHELL_PNPM_REGISTRY to it; the same pinned version and checksum are required. Nothing was installed.",
+	runtimeTls: "The TLS connection to a pinned runtime download source was rejected. If your network inspects TLS, point NODE_EXTRA_CA_CERTS at your organization's CA certificate; never disable certificate checks. Nothing was installed.",
+	runtimeIntegrity: "A pinned runtime download did not match its pinned checksum, so nothing was extracted or run. The source (or a mirror or proxy) served different bytes; make sure it serves the exact upstream file, then run the installer again.",
+	versionUnavailable: "Your npm registry did not serve a package version the release pins (named below). Gentle Shell never replaces the release's pinned versions, so nothing was installed. " +
+		"Ask your registry administrator to make that exact version available, or check your access to it, then run the installer again.",
+	versionAuth: "Your npm registry or proxy asked for authentication or rejected it (shown below). The installer copies the registry and authentication settings from your npm configuration (~/.npmrc) but cannot tell whether they are still valid; renew them, then run the installer again.",
+	versionUnreachable: `Your npm registry could not be reached while installing the release. Check your network connection, proxy and the registry in your npm configuration. ${tryAgain}`,
+	versionTls: "The TLS connection to your npm registry was rejected. Set the registry's CA certificate (cafile) in your npm configuration or NODE_EXTRA_CA_CERTS; never disable certificate checks. Then run the installer again.",
+	versionIntegrity: "A package your npm registry served does not match the integrity the release lockfile pins, so the installation stopped. Make sure the registry serves the exact upstream package, then run the installer again.",
 });
 
 /** The runner's setup detail, bounded again: text only, no control characters,
@@ -196,15 +209,32 @@ const goConflict = (detail) => detail.startsWith("Conflicting Go destination: ")
 const codeIntegrityBlocked = (detail) => /\bspawn UNKNOWN\b/.test(detail);
 // The main channel's typed error when GitHub refused the latest main commit with HTTP 403.
 const githubLimited = (detail) => rateLimited(detail) || (/\bmain-commit-unavailable\b/.test(detail) && /\bHTTP 403\b/.test(detail));
+// The guidance key a classified install-runtime or install-version diagnostic
+// names (installer-diagnostics wording), or null for any other detail.
+function networkGuidance(prefix, detail) {
+	const status = /\bHTTP (\d{3})\b/.exec(detail)?.[1];
+	if (status) {
+		if (prefix === "runtime") return "runtimeRefused";
+		return ["401", "407"].includes(status) ? "versionAuth" : ["403", "404"].includes(status) ? "versionUnavailable" : null;
+	}
+	if (/could not be reached \(connection refused, reset or timed out\)/.test(detail)) return `${prefix}Unreachable`;
+	if (/TLS connection to the (?:download source|npm registry) was rejected/.test(detail)) return `${prefix}Tls`;
+	if (/do(?:es)? not match the (?:pinned checksum|integrity the release lockfile pins)/.test(detail)) return `${prefix}Integrity`;
+	return null;
+}
+const runtimeGuidance = (detail) => networkGuidance("runtime", detail);
+const versionGuidance = (detail) => networkGuidance("version", detail);
 // Fixed steps whose sanitized last error line may reach the browser.
-// The bundled steps send a detail only for a migration (its error message); a new install's send none.
-const bundledDetail = Object.fromEntries(["claim-prefix", "copy-npm-settings", "install-runtime", "activate-version", "write-launcher", "verify-launcher", "bundled-path"]
+// The bundled steps send a detail only for a migration (its error message); a new install's send none,
+// except install-runtime and install-version, which send their classified network diagnostic.
+const bundledDetail = Object.fromEntries(["claim-prefix", "copy-npm-settings", "activate-version", "write-launcher", "verify-launcher", "bundled-path"]
 	.map((step) => [step, () => false]));
-const detailSteps = Object.freeze({ ...bundledDetail, "shell-setup": rateLimited, "install-version": codeIntegrityBlocked, "persist-path": unknownShell, "acquire-go": goConflict,
+const detailSteps = Object.freeze({ ...bundledDetail, "install-runtime": (detail) => runtimeGuidance(detail) !== null,
+	"install-version": (detail) => codeIntegrityBlocked(detail) || versionGuidance(detail) !== null, "shell-setup": rateLimited, "persist-path": unknownShell, "acquire-go": goConflict,
 	"install-global": (detail) => githubLimited(detail) || codeIntegrityBlocked(detail), "install-shell-main": githubLimited, "build-gentle-ai-main": githubLimited, "update-shell": githubLimited });
 // A step whose detail can match more than one pattern names its guidance by detail.
 const detailGuidance = Object.freeze({ "shell-setup": "setupRateLimit", "persist-path": "persistPathShell", "acquire-go": "goDestinationConflict",
-	"install-version": "codeIntegrityBlocked", "install-global": (detail) => (githubLimited(detail) ? "githubRateLimit" : "codeIntegrityBlocked"), "install-shell-main": "githubRateLimit", "build-gentle-ai-main": "githubRateLimit", "update-shell": "githubRateLimit" });
+	"install-runtime": runtimeGuidance, "install-version": (detail) => (codeIntegrityBlocked(detail) ? "codeIntegrityBlocked" : versionGuidance(detail)), "install-global": (detail) => (githubLimited(detail) ? "githubRateLimit" : "codeIntegrityBlocked"), "install-shell-main": "githubRateLimit", "build-gentle-ai-main": "githubRateLimit", "update-shell": "githubRateLimit" });
 
 const ID = /^[a-z][a-z0-9-]{0,63}$/;
 function identifier(value, fallback = "unknown") {

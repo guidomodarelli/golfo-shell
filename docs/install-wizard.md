@@ -666,6 +666,7 @@ Pi but never reinstalls or downgrades it, and nothing changes before consent.
 | A Gentle Shell neither pnpm nor npm owns (an `npm link` of a source checkout, for example) | Blocked with an explanation; never reinstalled. |
 | A stable Node.js outside the supported range (mise, nvm, Homebrew, pnpm or an old installer) | The POSIX bootstrap acquires verified Node 24.21.0 and the plan persists it (`persist-node`, `persist-package-managers`, `configure-npm-prefix`). A Node already in `$PNPM_HOME/bin` is replaced even when a different Node appears first on PATH; that other Node is left unchanged. The plan says so before consent. An unknown or prerelease version still blocks. Windows: `bootstrap.cmd` does the same, and also acquires its Node for a user Node whose storage it cannot trust (nvm-windows' symlink, fnm's junction), which it never runs. |
 | A pnpm older than 11.1.1, or whose engine rejects the bootstrap's Node (or, for the bootstraps only, another major) | Left unchanged. Both bootstraps acquire the verified pnpm 11.1.1 as when pnpm is absent, and the plan persists it (`persist-pnpm`, or `persist-package-managers` with npm). The plan says so before consent. Unknown evidence still blocks. |
+| A POSIX `pnpm` script on PATH that is none of pnpm's own shims and has no pnpm package around it (a wrapper that delegates to a tool runner) | Never run or changed. The POSIX bootstrap says so on stderr and acquires the verified pnpm 11.1.1 as when pnpm is absent; `GENTLE_SHELL_PNPM_REGISTRY` can point that download at an authorized npm mirror ([bundled install](bundled-install.md#corporate-registries-and-mirrors)). |
 | That pnpm in `$PNPM_HOME/bin` itself (where persisting pnpm writes) | Never replaced or downgraded. At 11.1.1 or newer, of any major (pnpm 12 included), it is used as it is and nothing is persisted over it. An older one blocks before consent; the guidance names the found and required versions and updates it with `pnpm self-update 11.1.1`. |
 | A pnpm in `$PNPM_HOME/bin` whose shim is not recognized or whose `pnpm --version` reports no stable version | Left unchanged and never run again. The bootstrap's verified pnpm runs the installer and nothing is persisted over it (no `persist-pnpm`). The plan says so before consent. |
 | An older Node.js or incompatible pnpm next to an existing Gentle Shell (updated or current) | Blocked before consent: runtimes are persisted only while installing Gentle Shell. A setup recovery is not blocked and persists nothing. |
@@ -1233,8 +1234,14 @@ No profile, global PATH, existing executable installation, product agent home,
 Engram state or companion installation is changed. Added paths affect only the
 bootstrap and its child. T4 must implement standard global installation and the
 persistent **ordinary terminal** handoff; these private wrappers are not that
-handoff. Existing unverifiable pnpm wrappers/binaries block instead of being
-silently replaced. No sudo or security exclusions are requested.
+handoff. Existing unverifiable pnpm shims and binaries block instead of being
+silently replaced. A POSIX `pnpm` script that has none of pnpm's own shim forms
+and no pnpm package around it, such as a corporate wrapper that delegates to a
+tool runner (`exec "$HOME/.wrapper/runner" pnpm "$@"`), is different: it proves
+nothing about the pnpm it reaches, if any, so it is never run or changed, the
+bootstrap prints that on stderr, and the verified pnpm 11.1.1 is acquired for
+the installation as when pnpm is absent. No sudo or security exclusions are
+requested.
 
 Stock utilities are prerequisites, not silently installed: POSIX sh, awk,
 dirname, uname, mkdir, mktemp, chmod, mv, rm, sleep, wc, id and ls; missing Node

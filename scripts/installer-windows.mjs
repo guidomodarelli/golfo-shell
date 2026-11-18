@@ -680,7 +680,9 @@ export async function ensureWindowsPnpm({ tools, env, node = process.execPath, a
 	const destination = join(tools, "pnpm");
 	if (exists(destination)) throw new Error("Conflicting Windows pnpm destination");
 	onStep("download");
-	const bytes = await verifiedDownload("pnpm", adapters);
+	// env selects only the authorized pnpm mirror (GENTLE_SHELL_PNPM_REGISTRY); version and hash stay pinned.
+	const artifact = adapters.artifact ?? ((name, platform, arch) => artifactFor(name, platform, arch, { env }));
+	const bytes = await verifiedDownload("pnpm", { ...adapters, artifact });
 	onStep("archive");
 	const entries = readWindowsPnpmArchive(bytes);
 	const pin = artifactFor("pnpm");
