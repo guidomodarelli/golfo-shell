@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { CLAUDE_COMPAT_IMPORT_DIRECTORY, CLAUDE_COMPAT_SKILLS_DIRECTORY, CLAUDE_COMPAT_STATE_SCHEMA, SKILL_FILE_NAME, SKILL_NAME_MAX_LENGTH, SKILL_NAME_PATTERN, SKILL_RESOURCE_DIRECTORIES } from "./constants.ts";
-import { findMarkdownFiles, isInside, type ManagedFiles, readFrontmatter, writeManagedFile } from "./files.ts";
+import { findMarkdownFiles, isInside, type ManagedFiles, OWNER_EXECUTE_BIT, PRIVATE_EXECUTABLE_FILE_MODE, PRIVATE_FILE_MODE, readFrontmatter, writeManagedFile } from "./files.ts";
 import { claudeDirectory, type ClaudePlugin, manifestPaths } from "./plugins.ts";
 
 /** Origin label of skills read from `~/.claude/skills`. */
@@ -82,8 +82,10 @@ function copyResources(source: string, target: string, previous: ManagedFiles, w
 	const canonical = realpathSync(source);
 	if (seen.has(canonical)) return;
 	seen.add(canonical);
-	if (statSync(canonical).isFile()) {
-		writeManagedFile(target, readFileSync(canonical), previous, written);
+	const sourceStats = statSync(canonical);
+	if (sourceStats.isFile()) {
+		const mode = sourceStats.mode & OWNER_EXECUTE_BIT ? PRIVATE_EXECUTABLE_FILE_MODE : PRIVATE_FILE_MODE;
+		writeManagedFile(target, readFileSync(canonical), previous, written, mode);
 		return;
 	}
 	for (const name of readdirSync(canonical).sort()) {

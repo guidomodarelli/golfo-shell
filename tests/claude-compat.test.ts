@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { assertRestrictedCommand, enforceAgentPolicy, parseCommandPattern, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
@@ -71,6 +71,27 @@ test("non-portable names are adapted in the derived cache with their resources; 
 		assert.equal(readFileSync(join(root, "skills/report/SKILL.md"), "utf8"), original);
 		assert.equal(normalizeSkillName("Sample Report!"), "sample-report");
 		assert.equal(normalizeSkillName(":::"), undefined);
+	} finally { fixture.dispose(); }
+});
+
+test("adapted skill resources keep the owner execute bit and stay private to group and others", { skip: process.platform === "win32" }, () => {
+	const fixture = createClaudeFixture();
+	try {
+		const root = fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"skills/report/SKILL.md": skillFile("sample:report"),
+			"skills/report/references/guide.md": "guide",
+			"skills/report/scripts/run.sh": "echo run",
+		} });
+		chmodSync(join(root, "skills/report/scripts/run.sh"), 0o755);
+		chmodSync(join(root, "skills/report/references/guide.md"), 0o644);
+		fixture.finalize();
+		const [skill] = sync(fixture).skills;
+		const scriptMode = statSync(join(skill.file, "..", "scripts", "run.sh")).mode;
+		assert.ok(scriptMode & 0o100, "the copied script stays executable by its owner");
+		assert.equal(scriptMode & 0o077, 0, "the copied script is not readable by group or others");
+		assert.equal(statSync(join(skill.file, "..", "references", "guide.md")).mode & 0o777, 0o600);
+		const [resynchronized] = sync(fixture).skills;
+		assert.ok(statSync(join(resynchronized.file, "..", "scripts", "run.sh")).mode & 0o100, "a second sync keeps the execute bit");
 	} finally { fixture.dispose(); }
 });
 

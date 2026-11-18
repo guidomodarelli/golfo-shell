@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { MAX_SCAN_DEPTH } from "./constants.ts";
 
 /** Hash of every derived file, recorded so later syncs never overwrite user edits. */
 export type ManagedFiles = Record<string, string>;
 
-const PRIVATE_FILE_MODE = 0o600;
+/** Owner read/write only: derived files stay private to group and others. */
+export const PRIVATE_FILE_MODE = 0o600;
+/** Owner read/write/execute only, for derived copies of executable resources. */
+export const PRIVATE_EXECUTABLE_FILE_MODE = 0o700;
+/** POSIX permission bit that marks a file executable by its owner. */
+export const OWNER_EXECUTE_BIT = 0o100;
 const PRIVATE_DIRECTORY_MODE = 0o700;
+const PERMISSION_BITS_MASK = 0o777;
 
 /** Reads an optional JSON file. Absence returns the fallback; corrupt JSON is an error, never ignored. */
 export function readJsonFile<T>(path: string, fallback: T): T {
@@ -78,9 +84,10 @@ export function findMarkdownFiles(root: string, fileName?: string, seen: Set<str
 
 /**
  * Writes a derived file. A file the adapter did not write, or that changed
- * since its last write, is never overwritten.
+ * since its last write, is never overwritten. The file always ends with
+ * `mode` (default private `0o600`), even when its content was already current.
  */
-export function writeManagedFile(path: string, content: string | Buffer, previous: ManagedFiles, written: ManagedFiles): void {
+export function writeManagedFile(path: string, content: string | Buffer, previous: ManagedFiles, written: ManagedFiles, mode: number = PRIVATE_FILE_MODE): void {
 	const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content);
 	if (existsSync(path)) {
 		const existing = readFileSync(path);
@@ -90,12 +97,13 @@ export function writeManagedFile(path: string, content: string | Buffer, previou
 				throw new Error(`claude-compat:writeManagedFile refused: ${path} was modified outside the importer; move or delete it to regenerate`);
 			}
 			mkdirSync(dirname(path), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-			writeFileSync(path, bytes, { mode: PRIVATE_FILE_MODE });
+			writeFileSync(path, bytes, { mode });
 		}
 	} else {
 		mkdirSync(dirname(path), { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-		writeFileSync(path, bytes, { mode: PRIVATE_FILE_MODE });
+		writeFileSync(path, bytes, { mode });
 	}
+	if ((statSync(path).mode & PERMISSION_BITS_MASK) !== mode) chmodSync(path, mode);
 	written[path] = digest(bytes);
 }
 
