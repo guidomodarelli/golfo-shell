@@ -6,8 +6,8 @@ import { loadClaudeCompatConfig } from "./config.ts";
 import { CLAUDE_COMPAT_IMPORT_DIRECTORY, CLAUDE_COMPAT_STATE_FILE, CLAUDE_COMPAT_STATE_SCHEMA } from "./constants.ts";
 import { type ManagedFiles, pruneManagedFiles, readJsonFile, writePrivateFile } from "./files.ts";
 import { type HookInventoryEntry, inventoryHooks, type ResolvedHook, resolveReviewedHooks } from "./hooks.ts";
-import { discoverPlugins, type SkippedPlugin } from "./plugins.ts";
-import { buildSkillCatalog, nativeSkillNamesFromDirectories, type SelectedSkill, type SkillDuplicate, type SkippedSkill } from "./skills.ts";
+import { discoverPlugins, readDisabledSkillNames, type SkippedPlugin } from "./plugins.ts";
+import { buildSkillCatalog, type DisabledSkill, nativeSkillNamesFromDirectories, type SelectedSkill, type SkillDuplicate, type SkippedSkill } from "./skills.ts";
 
 /** Derived, regenerable import state. Local only: it must never be published. */
 export interface ClaudeCompatState {
@@ -17,6 +17,8 @@ export interface ClaudeCompatState {
 	skills: SelectedSkill[];
 	duplicates: SkillDuplicate[];
 	skippedSkills: SkippedSkill[];
+	/** Skills `skillOverrides` turned `"off"`; absent in states written before golfo-shell#6. */
+	disabledSkills?: DisabledSkill[];
 	agents: ConvertedAgent[];
 	policies: AgentPolicy[];
 	agentErrors: AgentImportError[];
@@ -66,7 +68,7 @@ export function synchronizeClaudeCompat(locations: SyncLocations): ClaudeCompatS
 	const { plugins, skipped } = discoverPlugins(home, config.nativeEquivalents);
 	const written: ManagedFiles = {};
 	const nativeSkillNames = nativeSkillNamesFromDirectories(locations.nativeSkillDirectories ?? defaultNativeSkillDirectories(home, agentHome));
-	const skills = buildSkillCatalog({ home, agentHome, plugins, nativeSkillNames, previous, written });
+	const skills = buildSkillCatalog({ home, agentHome, plugins, nativeSkillNames, disabledSkillNames: readDisabledSkillNames(home), previous, written });
 	const agents = buildAgentCatalog({ home, agentHome, plugins, previous, written });
 	const reviewed = resolveReviewedHooks(config.hooks, plugins);
 	const ownedRoots = [join(agentHome, "agents"), join(agentHome, CLAUDE_COMPAT_IMPORT_DIRECTORY)];
@@ -77,6 +79,7 @@ export function synchronizeClaudeCompat(locations: SyncLocations): ClaudeCompatS
 		skills: skills.skills,
 		duplicates: skills.duplicates,
 		skippedSkills: skills.skipped,
+		disabledSkills: skills.disabled,
 		agents: agents.agents,
 		policies: agents.policies,
 		agentErrors: agents.errors,

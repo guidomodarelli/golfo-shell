@@ -517,3 +517,95 @@ test("sync writes only derived state under the Pi agent home and leaves Claude C
 		assert.equal(JSON.parse(readFileSync(claudeCompatStatePath(fixture.agentHome), "utf8")).schema, "gentle-pi.claude-compat-state/v1");
 	} finally { fixture.dispose(); }
 });
+
+test("skillOverrides \"off\" drops a skill by its original name from every plugin version, duplicate and user copy; siblings stay", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report", "old"), "skills/other/SKILL.md": skillFile("sample:other") } });
+		fixture.plugin({ key: "sample@market", version: "2.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report", "new") } });
+		fixture.plugin({ key: "zeta@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report", "zeta") } });
+		fixture.write("home/.claude/skills/sample-report/SKILL.md", skillFile("sample:report", "legacy"));
+		fixture.finalize({ skillOverrides: { "sample:report": "off" } });
+		const state = sync(fixture);
+		assert.deepEqual(state.skills.map((skill) => skill.name), ["sample-other"], "the rest of the plugin stays available");
+		assert.equal(state.disabledSkills?.length, 4, "every matching candidate is excluded, none is reintroduced");
+		assert.ok(state.disabledSkills?.every((skill) => skill.override === "sample:report"));
+		assert.deepEqual(state.duplicates, [], "disabled candidates never compete as duplicates");
+		assert.equal(existsSync(join(fixture.agentHome, "claude-import", "skills", "sample-report")), false, "no adapted copy is written");
+		assert.match(formatClaudeCompatReport(state), /Skills desactivadas por skillOverrides \("off"\):\n {2}- sample:report: /);
+	} finally { fixture.dispose(); }
+});
+
+test("skillOverrides \"off\" also matches the normalized portable name", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report"), "skills/other/SKILL.md": skillFile("other") } });
+		fixture.finalize({ skillOverrides: { "sample-report": "off" } });
+		const state = sync(fixture);
+		assert.deepEqual(state.skills.map((skill) => skill.name), ["other"]);
+		assert.deepEqual(state.disabledSkills?.map((skill) => skill.override), ["sample-report"]);
+	} finally { fixture.dispose(); }
+});
+
+test("skillOverrides without an exact \"off\" keeps the current selection", () => {
+	for (const skillOverrides of [undefined, {}, { "sample:report": "on" }, { "sample:report": "OFF" }, { "sample:report": false }, { "sample-report": "user-invocable-only" }, ["sample:report"], "off"]) {
+		const fixture = createClaudeFixture();
+		try {
+			fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report") } });
+			fixture.finalize(skillOverrides === undefined ? {} : { skillOverrides });
+			const state = sync(fixture);
+			assert.deepEqual(state.skills.map((skill) => skill.name), ["sample-report"], JSON.stringify(skillOverrides));
+			assert.deepEqual(state.disabledSkills, []);
+		} finally { fixture.dispose(); }
+	}
+});
+
+test("turning a skill off retires its derived copy and removing the override restores it; Claude settings stay untouched", () => {
+	const fixture = createClaudeFixture();
+	try {
+		const root = fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report"), "skills/report/references/guide.md": "guide" } });
+		fixture.finalize();
+		const original = readFileSync(join(root, "skills/report/SKILL.md"), "utf8");
+		const [imported] = sync(fixture).skills;
+		assert.equal(existsSync(imported.file), true);
+		fixture.finalize({ skillOverrides: { "sample:report": "off" } });
+		const settings = readFileSync(join(fixture.home, ".claude", "settings.json"), "utf8");
+		const disabled = sync(fixture);
+		assert.deepEqual(disabled.skills, []);
+		assert.equal(existsSync(imported.file), false, "the intact derived copy is pruned");
+		assert.equal(existsSync(join(imported.file, "..", "references", "guide.md")), false);
+		assert.equal(readFileSync(join(fixture.home, ".claude", "settings.json"), "utf8"), settings, "skillOverrides is read, never rewritten");
+		fixture.finalize();
+		const [restored] = sync(fixture).skills;
+		assert.equal(restored.name, "sample-report");
+		assert.equal(readFileSync(join(restored.file, "..", "references", "guide.md"), "utf8"), "guide", "restored without reinstalling the plugin");
+		assert.equal(readFileSync(join(root, "skills/report/SKILL.md"), "utf8"), original);
+	} finally { fixture.dispose(); }
+});
+
+test("a disabled skill whose derived copy the user edited keeps that copy and reports it", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report") } });
+		fixture.finalize();
+		const [imported] = sync(fixture).skills;
+		writeFileSync(imported.file, "user edit");
+		fixture.finalize({ skillOverrides: { "sample:report": "off" } });
+		const state = sync(fixture);
+		assert.deepEqual(state.skills, []);
+		assert.equal(readFileSync(imported.file, "utf8"), "user edit");
+		assert.ok(state.retainedModified.includes(imported.file));
+	} finally { fixture.dispose(); }
+});
+
+test("skillOverrides never shadows Pi's native skills nor lets an import take a native name", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "alpha@market", version: "1.0.0", files: { "skills/review/SKILL.md": skillFile("review") } });
+		fixture.write("agent/skills/review/SKILL.md", skillFile("review", "native"));
+		fixture.finalize({ skillOverrides: { review: "off" } });
+		const state = sync(fixture);
+		assert.deepEqual(state.skills, []);
+		assert.equal(existsSync(join(fixture.agentHome, "skills", "review", "SKILL.md")), true, "the native skill is left alone");
+	} finally { fixture.dispose(); }
+});

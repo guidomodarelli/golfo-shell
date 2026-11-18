@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { SKILL_OVERRIDE_DISABLED } from "./constants.ts";
 import { readJsonFile } from "./files.ts";
 
 /** One installed Claude Code plugin entry the importer may read. */
@@ -39,6 +40,16 @@ export function claudeDirectory(home: string): string {
 
 export function readClaudeSettings(home: string): Record<string, unknown> {
 	return readJsonFile<Record<string, unknown>>(join(claudeDirectory(home), "settings.json"), {});
+}
+
+/**
+ * Skill names `skillOverrides` sets to exactly `"off"`. Other values, a missing
+ * field or a malformed one disable nothing. Read only: settings are never written.
+ */
+export function readDisabledSkillNames(home: string): Set<string> {
+	const overrides = readClaudeSettings(home).skillOverrides;
+	if (typeof overrides !== "object" || overrides === null || Array.isArray(overrides)) return new Set();
+	return new Set(Object.entries(overrides).filter(([, value]) => value === SKILL_OVERRIDE_DISABLED).map(([name]) => name));
 }
 
 function compareVersionsDescending(left: string, right: string): number {

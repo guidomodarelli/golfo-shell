@@ -15,7 +15,7 @@ Nada se importa solo: al arrancar, la extensión únicamente lee el estado deriv
 
 Lee (nunca modifica):
 
-- `~/.claude/settings.json` (`enabledPlugins`, `hooks`) y `~/.claude/plugins/installed_plugins.json`.
+- `~/.claude/settings.json` (`enabledPlugins`, `skillOverrides`, `hooks`) y `~/.claude/plugins/installed_plugins.json`.
 - De cada plugin **habilitado e instalado con scope `user`**: `skills/`, `agents/`, `hooks/hooks.json` y las rutas declaradas en `.claude-plugin/plugin.json`. Las instalaciones con scope de proyecto o local de otros repos no se promueven a configuración global.
 - `~/.claude/skills/` y `~/.claude/agents/`.
 
@@ -33,6 +33,21 @@ No toca `settings.json` de Pi ni de Claude Code. Un archivo derivado que editast
 - Precedencia determinista: skills nativas de Pi (agent home, `~/.agents/skills`, el paquete y las del proyecto) > plugins habilitados ordenados por clave, instalación más nueva primero > `~/.claude/skills`. Las versiones anteriores de un plugin solo aportan skills que la más nueva no tiene.
 - Duplicados y skills de otros hosts que no ganaron se informan y no se cargan, así el catálogo importado no agrega avisos de colisión.
 - Nombres no portables (`sample:report`, mayúsculas, espacios) se normalizan (`sample-report`) en una copia en caché que incluye `references/`, `scripts/` y `assets/`; el original queda intacto y la copia apunta a su directorio.
+
+### Desactivar skills con `skillOverrides`
+
+Una entrada de `skillOverrides` en `~/.claude/settings.json` con valor exacto `"off"` deja esa skill fuera de la importación:
+
+```json
+{ "skillOverrides": { "sample:report": "off" } }
+```
+
+- La clave puede ser el nombre original (`sample:report`) o el portable normalizado (`sample-report`).
+- El filtro se aplica a cada candidata **antes** de elegir ganadores o escribir copias: ninguna versión anterior del plugin, duplicado de otro plugin ni copia en `~/.claude/skills` la reintroduce. Las demás skills del plugin siguen disponibles; el plugin no se deshabilita.
+- Cualquier otro valor, un objeto vacío o la ausencia del campo no cambian la selección.
+- Tras marcarla y ejecutar `/claude-compat:sync`, la skill deja de publicarse por `resources_discover` y su copia derivada intacta se retira (una editada a mano se conserva, como siempre). Quitar la entrada y sincronizar de nuevo la restaura sin reinstalar el plugin.
+- El informe la lista en "Skills desactivadas por skillOverrides".
+- Es una decisión del importador: no reescribe la configuración de Claude Code ni de Pi, no reemplaza los permisos de Claude Code y no desactiva skills que Pi descubre por su cuenta (agent home, `~/.agents/skills`, el paquete o el proyecto).
 
 ## Agentes
 

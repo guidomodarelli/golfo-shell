@@ -120,6 +120,29 @@ test("real Pi loader: selected skills load through resources_discover without co
 	} finally { fixture.dispose(); }
 });
 
+test("real Pi loader: a skill turned off in skillOverrides leaves the catalog after sync and comes back when the override is removed", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: { "skills/report/SKILL.md": skillFile("sample:report"), "skills/other/SKILL.md": skillFile("sample:other") } });
+		fixture.write("agent/skills/native-check/SKILL.md", skillFile("native-check", "native"));
+		const discovered = async () => {
+			const { session, loader } = await startSession({ ...fixture, env: {}, tools: ["read"], plan: [] });
+			try { return loader.getSkills().skills.map((skill) => skill.name).filter((name) => ["sample-report", "sample-other", "native-check"].includes(name)).sort(); }
+			finally { session.dispose(); }
+		};
+		const synchronize = () => synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [join(fixture.agentHome, "skills")] });
+		fixture.finalize();
+		synchronize();
+		assert.deepEqual(await discovered(), ["native-check", "sample-other", "sample-report"]);
+		fixture.finalize({ skillOverrides: { "sample:report": "off", "native-check": "off" } });
+		synchronize();
+		assert.deepEqual(await discovered(), ["native-check", "sample-other"], "the disabled import is gone; Pi's native skill keeps loading");
+		fixture.finalize();
+		synchronize();
+		assert.deepEqual(await discovered(), ["native-check", "sample-other", "sample-report"], "removing the override restores it");
+	} finally { fixture.dispose(); }
+});
+
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => unknown;
 function harness(env: NodeJS.ProcessEnv, fixture: ReturnType<typeof createClaudeFixture>) {
 	const handlers = new Map<string, Handler>();
