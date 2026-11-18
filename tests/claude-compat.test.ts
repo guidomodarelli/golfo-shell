@@ -7,7 +7,7 @@ import { splitToolList, translateTools } from "../lib/claude-compat/agents.ts";
 import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
 import { readFrontmatter } from "../lib/claude-compat/files.ts";
-import { callReviewedHook, decodeHookResult, hookAppliesToTool, translateToolInput } from "../lib/claude-compat/hooks.ts";
+import { callReviewedHook, claudeToolNameForHook, decodeHookResult, hookAppliesToTool, translateToolInput } from "../lib/claude-compat/hooks.ts";
 import { runProcess } from "../lib/claude-compat/process.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { normalizeSkillName } from "../lib/claude-compat/skills.ts";
@@ -384,6 +384,20 @@ test("Pi tool input reaches hooks with Claude Code names: absolute file_path, Ed
 	assert.equal(hookAppliesToTool(editHook, "edit"), true, "MultiEdit matcher covers Pi edit");
 	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Edit"] }, "edit"), true);
 	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Write"] }, "edit"), false);
+});
+
+test("a reviewed hook configured with Claude Code MCP names covers the Pi calls whose server Pi normalized", () => {
+	const mcpHook = { id: "publish-guard", event: "PreToolUse" as const, tools: ["mcp__dev-docs__publish"], script: "x", root: resolve("project") };
+	assert.equal(hookAppliesToTool(mcpHook, "mcp__dev_docs__publish"), true, "dev-docs is dev_docs in Pi");
+	assert.equal(hookAppliesToTool(mcpHook, "mcp__dev_docs__read"), false, "another tool of the server is not covered");
+	assert.equal(claudeToolNameForHook(mcpHook, "mcp__dev_docs__publish"), "mcp__dev-docs__publish", "the hook sees the name it was configured with");
+	assert.equal(claudeToolNameForHook(mcpHook, "bash"), "bash");
+	const serverHook = { ...mcpHook, tools: ["mcp__dev-docs"] };
+	assert.equal(hookAppliesToTool(serverHook, "mcp__dev_docs__publish"), true, "a server matcher covers its tools");
+	assert.equal(hookAppliesToTool(serverHook, "mcp__dev_docs__read"), true);
+	assert.equal(hookAppliesToTool(serverHook, "mcp__dev_docs_extra__read"), false, "a server sharing the prefix is another server");
+	assert.equal(hookAppliesToTool(serverHook, "mcp__other__publish"), false);
+	assert.equal(hookAppliesToTool(serverHook, "bash"), false);
 });
 
 test("hook processes are bounded: timeout, oversized output and cancellation fail closed", async () => {

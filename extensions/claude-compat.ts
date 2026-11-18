@@ -8,7 +8,7 @@ import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { enforceAgentPolicy, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { HOOK_CONTEXT_MESSAGE_TYPE, HOOK_EVENT, STATUS_COMMAND, SYNC_COMMAND } from "../lib/claude-compat/constants.ts";
 import { markClaudeCompatGuardActive } from "../lib/claude-compat/guard-signal.ts";
-import { callReviewedHook, hookAppliesToTool, hookPayload, type ResolvedHook, translateToolInput, unavailableGuardReason } from "../lib/claude-compat/hooks.ts";
+import { callReviewedHook, claudeToolNameForHook, hookAppliesToTool, hookPayload, type ResolvedHook, translateToolInput, unavailableGuardReason } from "../lib/claude-compat/hooks.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { type ClaudeCompatState, readClaudeCompatState, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
 
@@ -93,7 +93,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			// A guard that cannot see the input in Claude Code's shape could approve it blindly.
 			if (!preToolCall) return block(`claude-compat: la entrada de ${event.toolName} no se puede representar para los hooks revisados (${preToolHooks.map((hook) => hook.id).join(", ")}); no se ejecutó la operación`);
 			for (const hook of preToolHooks) {
-				const payload = hookPayload(HOOK_EVENT.PRE_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...preToolCall, callId: event.toolCallId });
+				const payload = hookPayload(HOOK_EVENT.PRE_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...preToolCall, toolName: claudeToolNameForHook(hook, preToolCall.toolName), callId: event.toolCallId });
 				const decision = await callReviewedHook(hook, payload, { cwd: ctx.cwd, signal: ctx.signal });
 				if (decision.action === "block") return block(decision.reason);
 				if (decision.action === "ask") {
@@ -181,7 +181,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			for (const hook of postToolHooks) {
 				try {
 					const response = event.content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("\n");
-					const payload = hookPayload(HOOK_EVENT.POST_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...postToolCall, callId: event.toolCallId, response });
+					const payload = hookPayload(HOOK_EVENT.POST_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...postToolCall, toolName: claudeToolNameForHook(hook, postToolCall.toolName), callId: event.toolCallId, response });
 					const decision = await callReviewedHook(hook, payload, { cwd: ctx.cwd, signal: ctx.signal });
 					if (decision.action === "continue" && decision.context) additions.push(decision.context);
 					else if (decision.action !== "continue") additions.push(`[claude-compat] ${hook.id}: ${decision.reason}`);

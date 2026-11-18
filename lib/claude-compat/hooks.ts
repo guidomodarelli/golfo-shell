@@ -1,8 +1,9 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { piMcpToolName } from "./agents.ts";
 import type { ReviewedHook } from "./config.ts";
-import { HOOK_EVENT, PI_TO_CLAUDE_TOOL, type SupportedHookEvent } from "./constants.ts";
+import { HOOK_EVENT, MCP_SEGMENT_SEPARATOR, MCP_TOOL_PREFIX, PI_TO_CLAUDE_TOOL, type SupportedHookEvent } from "./constants.ts";
 import { pluginFile, readJsonFile } from "./files.ts";
 import { type ClaudePlugin, readClaudeSettings } from "./plugins.ts";
 import { runHookScript } from "./process.ts";
@@ -288,12 +289,32 @@ const EQUIVALENT_CLAUDE_TOOLS: Readonly<Record<string, readonly string[]>> = {
 	[CLAUDE_TOOL.MULTI_EDIT]: [CLAUDE_TOOL.EDIT, CLAUDE_TOOL.MULTI_EDIT],
 };
 
+/**
+ * Whether a Claude Code MCP matcher (`mcp__dev-docs__publish`, or the whole
+ * server `mcp__dev-docs`) covers a Pi MCP tool, whose server Pi normalizes
+ * (`mcp__dev_docs__publish`).
+ */
+function mcpMatcherCovers(matcher: string, piToolName: string): boolean {
+	if (!matcher.startsWith(MCP_TOOL_PREFIX) || !piToolName.startsWith(MCP_TOOL_PREFIX)) return false;
+	const normalizedMatcher = piMcpToolName(matcher);
+	return piToolName === normalizedMatcher || piToolName.startsWith(`${normalizedMatcher}${MCP_SEGMENT_SEPARATOR}`);
+}
+
 /** Whether a reviewed tool hook applies to this Pi tool. */
 export function hookAppliesToTool(hook: ResolvedHook, piToolName: string): boolean {
 	if (!hook.tools) return true;
 	const claudeName = PI_TO_CLAUDE_TOOL[piToolName] ?? piToolName;
 	const names = EQUIVALENT_CLAUDE_TOOLS[claudeName] ?? [claudeName];
-	return hook.tools.some((tool) => names.includes(tool));
+	return hook.tools.some((tool) => names.includes(tool) || mcpMatcherCovers(tool, piToolName));
+}
+
+/**
+ * The `tool_name` a reviewed hook receives: the exact Claude Code MCP name it
+ * was configured with when that name is the one Pi normalized into
+ * `piToolName`, so a hook comparing `tool_name` keeps recognizing its tool.
+ */
+export function claudeToolNameForHook(hook: ResolvedHook, piToolName: string): string {
+	return hook.tools?.find((tool) => tool.startsWith(MCP_TOOL_PREFIX) && piMcpToolName(tool) === piToolName) ?? piToolName;
 }
 
 /** Runs a reviewed hook with the Claude Code environment variables it expects. */

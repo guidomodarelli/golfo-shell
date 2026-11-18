@@ -202,6 +202,25 @@ test("a reviewed PreToolUse guard whose script was removed fails closed; a missi
 	} finally { fixture.dispose(); }
 });
 
+test("an unavailable PreToolUse guard configured with a Claude Code MCP name blocks the normalized Pi MCP call", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "guard@market", version: "1.0.0", files: { "hooks/other.mjs": "" } });
+		fixture.finalize();
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [
+			{ id: "publish-guard", plugin: "guard", script: "hooks/publish.mjs", event: "PreToolUse", tools: ["mcp__dev-docs__publish"] },
+		] }));
+		const state = synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		assert.equal(state.hooks[0].unavailable, "script hooks/publish.mjs no existe en guard");
+		const context = { cwd: fixture.root, hasUI: true, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async () => true, notify: () => {} } } as unknown as ExtensionContext;
+		const { handlers } = harness({}, fixture);
+		const blocked = await handlers.get("tool_call")!({ toolName: "mcp__dev_docs__publish", toolCallId: "1", input: { page: "x" } }, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.match(blocked.reason, /guard publish-guard no disponible/);
+		assert.equal(await handlers.get("tool_call")!({ toolName: "mcp__dev_docs__read", toolCallId: "2", input: {} }, context), undefined, "the guard only covers publish");
+	} finally { fixture.dispose(); }
+});
+
 test("an unreadable state keeps the configured PreToolUse guards blocking, refuses every call without a readable config, and leaves guard-free sessions working", async () => {
 	const fixture = createClaudeFixture();
 	try {
