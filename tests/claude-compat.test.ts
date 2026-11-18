@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { assertRestrictedCommand, enforceAgentPolicy, parseCommandPattern, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { splitToolList, translateTools } from "../lib/claude-compat/agents.ts";
 import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
-import { callReviewedHook, decodeHookResult } from "../lib/claude-compat/hooks.ts";
+import { callReviewedHook, decodeHookResult, hookAppliesToTool, translateToolInput } from "../lib/claude-compat/hooks.ts";
 import { runProcess } from "../lib/claude-compat/process.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { normalizeSkillName } from "../lib/claude-compat/skills.ts";
@@ -249,6 +249,25 @@ test("hook decisions preserve deny and ask, never treat allow as consent, and fa
 	}
 	assert.throws(() => decodeHookResult(result("not json"), false), /JSON inválido/);
 	assert.deepEqual(decodeHookResult(result(JSON.stringify({ hookSpecificOutput: { additionalContext: "ctx" } })), false), { action: "continue", context: "ctx" });
+});
+
+test("Pi tool input reaches hooks with Claude Code names: absolute file_path, Edit/MultiEdit, ms timeout", () => {
+	const cwd = resolve("project");
+	assert.deepEqual(translateToolInput("write", { path: "x/.env", content: "A=1" }, cwd), { toolName: "Write", input: { file_path: join(cwd, "x", ".env"), content: "A=1" } });
+	assert.deepEqual(translateToolInput("read", { path: "a.ts", offset: 2 }, cwd), { toolName: "Read", input: { file_path: join(cwd, "a.ts"), offset: 2 } });
+	assert.deepEqual(translateToolInput("edit", { path: "a.ts", edits: [{ oldText: "a", newText: "b" }] }, cwd), { toolName: "Edit", input: { file_path: join(cwd, "a.ts"), old_string: "a", new_string: "b" } });
+	assert.deepEqual(translateToolInput("edit", { path: "a.ts", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, cwd),
+		{ toolName: "MultiEdit", input: { file_path: join(cwd, "a.ts"), edits: [{ old_string: "a", new_string: "b" }, { old_string: "c", new_string: "d" }] } });
+	assert.deepEqual(translateToolInput("bash", { command: "ls", timeout: 5 }, cwd), { toolName: "Bash", input: { command: "ls", timeout: 5000 } });
+	assert.deepEqual(translateToolInput("ls", {}, cwd), { toolName: "LS", input: { path: cwd } });
+	assert.deepEqual(translateToolInput("mcp_tool", { any: 1 }, cwd), { toolName: "mcp_tool", input: { any: 1 } });
+	for (const [tool, input] of [["edit", { path: "a.ts", edits: [] }], ["edit", { path: "a.ts", edits: "x" }], ["write", { path: 1, content: "" }], ["read", {}], ["bash", { command: "ls", timeout: "5" }]] as const) {
+		assert.equal(translateToolInput(tool, input, cwd), undefined, `${tool} ${JSON.stringify(input)}`);
+	}
+	const editHook = { id: "guard", event: "PreToolUse" as const, tools: ["MultiEdit"], script: "x", root: cwd };
+	assert.equal(hookAppliesToTool(editHook, "edit"), true, "MultiEdit matcher covers Pi edit");
+	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Edit"] }, "edit"), true);
+	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Write"] }, "edit"), false);
 });
 
 test("hook processes are bounded: timeout, oversized output and cancellation fail closed", async () => {

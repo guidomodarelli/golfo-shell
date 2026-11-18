@@ -7,7 +7,7 @@ import { CHILD_SKILLS_CATALOG_ENV, REQUESTED_TOOLS_ENV } from "../lib/agents-run
 import { enforceAgentPolicy, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { HOOK_CONTEXT_MESSAGE_TYPE, HOOK_EVENT, STATUS_COMMAND, SYNC_COMMAND } from "../lib/claude-compat/constants.ts";
 import { markClaudeCompatGuardActive } from "../lib/claude-compat/guard-signal.ts";
-import { callReviewedHook, hookAppliesToTool, hookPayload, type ResolvedHook } from "../lib/claude-compat/hooks.ts";
+import { callReviewedHook, hookAppliesToTool, hookPayload, type ResolvedHook, translateToolInput } from "../lib/claude-compat/hooks.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { type ClaudeCompatState, readClaudeCompatState, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
 
@@ -60,8 +60,13 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 				const detail = error instanceof PolicyViolation ? error.message : `no se pudo validar la política (${error instanceof Error ? error.message : String(error)})`;
 				return block(`claude-compat: ${detail}`);
 			}
-			for (const hook of hooksFor(state, HOOK_EVENT.PRE_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName))) {
-				const payload = hookPayload(HOOK_EVENT.PRE_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { name: event.toolName, input, callId: event.toolCallId });
+			const preToolHooks = hooksFor(state, HOOK_EVENT.PRE_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName));
+			if (preToolHooks.length === 0) return undefined;
+			const preToolCall = translateToolInput(event.toolName, input, ctx.cwd);
+			// A guard that cannot see the input in Claude Code's shape could approve it blindly.
+			if (!preToolCall) return block(`claude-compat: la entrada de ${event.toolName} no se puede representar para los hooks revisados (${preToolHooks.map((hook) => hook.id).join(", ")}); no se ejecutó la operación`);
+			for (const hook of preToolHooks) {
+				const payload = hookPayload(HOOK_EVENT.PRE_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...preToolCall, callId: event.toolCallId });
 				const decision = await callReviewedHook(hook, payload, { cwd: ctx.cwd, signal: ctx.signal });
 				if (decision.action === "block") return block(decision.reason);
 				if (decision.action === "ask") {
@@ -138,10 +143,17 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 		pi.on("tool_result", async (event, ctx) => {
 			if (event.isError) return undefined;
 			const additions: string[] = [];
-			for (const hook of hooksFor(state, HOOK_EVENT.POST_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName))) {
+			const postToolHooks = hooksFor(state, HOOK_EVENT.POST_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName));
+			if (postToolHooks.length === 0) return undefined;
+			const postToolCall = translateToolInput(event.toolName, event.input, ctx.cwd);
+			if (!postToolCall) {
+				ctx.ui.notify(`claude-compat: se omitieron los hooks ${postToolHooks.map((hook) => hook.id).join(", ")} tras ${event.toolName}: su entrada no se puede representar como la de Claude Code`, "warning");
+				return undefined;
+			}
+			for (const hook of postToolHooks) {
 				try {
 					const response = event.content.filter((part) => part.type === "text").map((part) => (part as { text: string }).text).join("\n");
-					const payload = hookPayload(HOOK_EVENT.POST_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { name: event.toolName, input: event.input, callId: event.toolCallId, response });
+					const payload = hookPayload(HOOK_EVENT.POST_TOOL_USE, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }, { ...postToolCall, callId: event.toolCallId, response });
 					const decision = await callReviewedHook(hook, payload, { cwd: ctx.cwd, signal: ctx.signal });
 					if (decision.action === "continue" && decision.context) additions.push(decision.context);
 					else if (decision.action !== "continue") additions.push(`[claude-compat] ${hook.id}: ${decision.reason}`);

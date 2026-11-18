@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import type { ReviewedHook } from "./config.ts";
 import { HOOK_EVENT, PI_TO_CLAUDE_TOOL, type SupportedHookEvent } from "./constants.ts";
 import { pluginFile, readJsonFile } from "./files.ts";
@@ -108,13 +109,109 @@ export function inventoryHooks(home: string, plugins: readonly ClaudePlugin[], r
 	return entries;
 }
 
-/** Minimal Pi → Claude Code payload; it never claims a Claude transcript. */
-export function hookPayload(event: SupportedHookEvent, context: { cwd: string; sessionId: string }, tool?: { name: string; input: unknown; callId: string; response?: string }): Record<string, unknown> {
+/** Claude Code tool names a translated Pi call can produce. */
+const CLAUDE_TOOL = {
+	BASH: "Bash",
+	READ: "Read",
+	WRITE: "Write",
+	EDIT: "Edit",
+	MULTI_EDIT: "MultiEdit",
+	GREP: "Grep",
+	GLOB: "Glob",
+	LS: "LS",
+} as const satisfies Record<string, string>;
+
+const MILLISECONDS_PER_SECOND = 1000;
+
+/** A Pi tool call expressed with Claude Code's tool name and `tool_input` field names. */
+export interface ClaudeToolCall {
+	toolName: string;
+	input: Record<string, unknown>;
+}
+
+type InputRecord = Record<string, unknown>;
+interface PiEdit { oldText: string; newText: string }
+
+function isRecord(value: unknown): value is InputRecord {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOptional(value: unknown, type: "string" | "number" | "boolean"): boolean {
+	return value === undefined || typeof value === type;
+}
+
+/** Claude Code always sends absolute paths; Pi also accepts `@`, `~` and cwd-relative ones. */
+function absolutePath(filePath: string, cwd: string): string {
+	const unprefixed = filePath.startsWith("@") ? filePath.slice(1) : filePath;
+	const expanded = unprefixed === "~" || /^~[\\/]/.test(unprefixed) ? join(homedir(), unprefixed.slice(1)) : unprefixed;
+	return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
+}
+
+function withoutUndefined(fields: InputRecord): InputRecord {
+	return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+function editsOf(input: InputRecord): PiEdit[] | undefined {
+	// Pi still accepts the legacy single-edit form (top-level oldText/newText).
+	const edits = input.edits === undefined && input.oldText !== undefined ? [{ oldText: input.oldText, newText: input.newText }] : input.edits;
+	if (!Array.isArray(edits) || edits.length === 0) return undefined;
+	return edits.every((edit) => isRecord(edit) && typeof edit.oldText === "string" && typeof edit.newText === "string") ? edits as PiEdit[] : undefined;
+}
+
+/**
+ * Translates a Pi tool call into the `tool_name`/`tool_input` a Claude Code
+ * hook expects: `path` → absolute `file_path`, Pi edits → `Edit` (one) or
+ * `MultiEdit` (several), bash timeout seconds → milliseconds. Returns
+ * `undefined` when a known tool's input does not have the shape Pi declares,
+ * so callers fail closed instead of handing a reviewed hook fields it would not
+ * recognize. Tools without a Claude Code counterpart keep their name and input.
+ */
+export function translateToolInput(piToolName: string, input: unknown, cwd: string): ClaudeToolCall | undefined {
+	if (!isRecord(input)) return undefined;
+	const claudeName = PI_TO_CLAUDE_TOOL[piToolName];
+	switch (claudeName) {
+		case undefined:
+			return { toolName: piToolName, input };
+		case CLAUDE_TOOL.READ:
+			if (typeof input.path !== "string" || !isOptional(input.offset, "number") || !isOptional(input.limit, "number")) return undefined;
+			return { toolName: claudeName, input: withoutUndefined({ file_path: absolutePath(input.path, cwd), offset: input.offset, limit: input.limit }) };
+		case CLAUDE_TOOL.WRITE:
+			if (typeof input.path !== "string" || typeof input.content !== "string") return undefined;
+			return { toolName: claudeName, input: { file_path: absolutePath(input.path, cwd), content: input.content } };
+		case CLAUDE_TOOL.EDIT: {
+			const edits = editsOf(input);
+			if (typeof input.path !== "string" || !edits) return undefined;
+			const filePath = absolutePath(input.path, cwd);
+			if (edits.length === 1) return { toolName: CLAUDE_TOOL.EDIT, input: { file_path: filePath, old_string: edits[0].oldText, new_string: edits[0].newText } };
+			return { toolName: CLAUDE_TOOL.MULTI_EDIT, input: { file_path: filePath, edits: edits.map((edit) => ({ old_string: edit.oldText, new_string: edit.newText })) } };
+		}
+		case CLAUDE_TOOL.BASH:
+			if (typeof input.command !== "string" || !isOptional(input.timeout, "number")) return undefined;
+			return { toolName: claudeName, input: withoutUndefined({ command: input.command, timeout: typeof input.timeout === "number" ? input.timeout * MILLISECONDS_PER_SECOND : undefined }) };
+		case CLAUDE_TOOL.GREP:
+			if (typeof input.pattern !== "string" || !isOptional(input.path, "string") || !isOptional(input.glob, "string") || !isOptional(input.ignoreCase, "boolean") || !isOptional(input.context, "number") || !isOptional(input.limit, "number")) return undefined;
+			return { toolName: claudeName, input: withoutUndefined({ pattern: input.pattern, path: typeof input.path === "string" ? absolutePath(input.path, cwd) : undefined, glob: input.glob, "-i": input.ignoreCase, "-C": input.context, head_limit: input.limit }) };
+		case CLAUDE_TOOL.GLOB:
+			if (typeof input.pattern !== "string" || !isOptional(input.path, "string")) return undefined;
+			return { toolName: claudeName, input: withoutUndefined({ pattern: input.pattern, path: typeof input.path === "string" ? absolutePath(input.path, cwd) : undefined }) };
+		case CLAUDE_TOOL.LS:
+			if (!isOptional(input.path, "string")) return undefined;
+			return { toolName: claudeName, input: { path: absolutePath(typeof input.path === "string" ? input.path : ".", cwd) } };
+		default:
+			return { toolName: claudeName, input };
+	}
+}
+
+/**
+ * Minimal Pi → Claude Code payload; it never claims a Claude transcript.
+ * `tool` must already be translated with {@link translateToolInput}.
+ */
+export function hookPayload(event: SupportedHookEvent, context: { cwd: string; sessionId: string }, tool?: ClaudeToolCall & { callId: string; response?: string }): Record<string, unknown> {
 	return {
 		hook_event_name: event,
 		session_id: context.sessionId,
 		cwd: context.cwd,
-		...(tool ? { tool_name: PI_TO_CLAUDE_TOOL[tool.name] ?? tool.name, tool_input: tool.input, tool_use_id: tool.callId } : {}),
+		...(tool ? { tool_name: tool.toolName, tool_input: tool.input, tool_use_id: tool.callId } : {}),
 		...(tool?.response !== undefined ? { tool_response: tool.response } : {}),
 	};
 }
@@ -165,11 +262,18 @@ export function decodeHookResult(result: { code: number; stdout: string; stderr:
 	return { action: "continue", ...(context ? { context } : {}) };
 }
 
+/** Claude Code names one concept with two tools: a matcher for either covers both. */
+const EQUIVALENT_CLAUDE_TOOLS: Readonly<Record<string, readonly string[]>> = {
+	[CLAUDE_TOOL.EDIT]: [CLAUDE_TOOL.EDIT, CLAUDE_TOOL.MULTI_EDIT],
+	[CLAUDE_TOOL.MULTI_EDIT]: [CLAUDE_TOOL.EDIT, CLAUDE_TOOL.MULTI_EDIT],
+};
+
 /** Whether a reviewed tool hook applies to this Pi tool. */
 export function hookAppliesToTool(hook: ResolvedHook, piToolName: string): boolean {
 	if (!hook.tools) return true;
 	const claudeName = PI_TO_CLAUDE_TOOL[piToolName] ?? piToolName;
-	return hook.tools.includes(claudeName);
+	const names = EQUIVALENT_CLAUDE_TOOLS[claudeName] ?? [claudeName];
+	return hook.tools.some((tool) => names.includes(tool));
 }
 
 /** Runs a reviewed hook with the Claude Code environment variables it expects. */

@@ -153,6 +153,28 @@ test("a reviewed PreToolUse hook's ask needs a fresh human confirmation and fail
 	} finally { fixture.dispose(); }
 });
 
+test("a reviewed PreToolUse hook sees Claude Code's tool_input: a .env guard blocks Pi writes and unrepresentable input fails closed", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		const envGuard = "let data='';process.stdin.on('data',(c)=>data+=c).on('end',()=>{const p=JSON.parse(data);const f=String(p.tool_input.file_path??'');process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:f.endsWith('.env')?'deny':'allow',permissionDecisionReason:p.tool_name+' '+f}}))});";
+		fixture.plugin({ key: "guard@market", version: "1.0.0", files: { "hooks/env.mjs": envGuard } });
+		fixture.finalize();
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [{ id: "env", plugin: "guard", script: "hooks/env.mjs", event: "PreToolUse", tools: ["Write", "Edit"] }] }));
+		synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		const context = { cwd: fixture.root, hasUI: false, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async () => false, notify() {} } } as unknown as ExtensionContext;
+		const toolCall = harness({}, fixture).handlers.get("tool_call")!;
+		const call = (toolName: string, input: Record<string, unknown>) => toolCall({ toolName, toolCallId: "1", input }, context) as Promise<{ block: boolean; reason: string } | undefined>;
+		const denied = await call("write", { path: "x/.env", content: "SECRET=1" });
+		assert.equal(denied?.block, true, "the guard reads tool_input.file_path");
+		assert.match(denied!.reason, /Write .*\.env/);
+		assert.equal(await call("write", { path: "x/app.ts", content: "" }), undefined);
+		assert.match((await call("edit", { path: "x/.env", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }))!.reason, /MultiEdit .*\.env/, "Edit matcher covers MultiEdit");
+		const unrepresentable = await call("edit", { path: "x/app.ts", edits: [] });
+		assert.equal(unrepresentable?.block, true);
+		assert.match(unrepresentable!.reason, /no se puede representar/);
+	} finally { fixture.dispose(); }
+});
+
 test("sync and status commands report the import; children get no import commands", async () => {
 	const fixture = createClaudeFixture();
 	try {

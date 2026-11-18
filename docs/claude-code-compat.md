@@ -73,6 +73,8 @@ Contrato de cada evento traducido:
 | `SessionStart` | igual, más `source` (`startup`, `clear`, `resume`, `compact`…) | `additionalContext` se inyecta como contexto oculto en el siguiente turno. |
 | `PostToolUse` | igual, más `tool_response` (texto) | `additionalContext` se agrega al resultado de la herramienta. |
 
+`tool_name` y `tool_input` usan los nombres de campo de Claude Code, no los de Pi: `read`/`write` → `Read`/`Write` con `file_path` absoluto (resuelto contra `cwd`), `edit` → `Edit` (`old_string`, `new_string`) con una edición o `MultiEdit` (`edits: [{ old_string, new_string }]`) con varias, `bash` → `Bash` (`command`, `timeout` en ms), `grep` → `Grep`, `find` → `Glob`, `ls` → `LS`. Un matcher `Edit` también cubre `MultiEdit` y viceversa. Si la entrada de una herramienta conocida no tiene la forma esperada, `PreToolUse` **bloquea** la llamada y los hooks `PostToolUse` se omiten con un aviso.
+
 Los scripts `.js/.mjs/.cjs` corren con el Node en uso y el resto con `bash` (en Windows, Git Bash; nunca el `bash.exe` de WSL en System32), sin shell intermedio, con `CLAUDE_PLUGIN_ROOT` y `CLAUDE_PROJECT_DIR`, límite de 10 s y 512 KiB de salida. En `PreToolUse`, código distinto de cero, JSON inválido, decisión desconocida, timeout o cancelación **bloquean**. En hooks de contexto, el error se avisa y no se inyecta nada.
 
 El informe separa:
