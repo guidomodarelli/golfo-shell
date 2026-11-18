@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earen
 import { Type } from "typebox";
 import { gentlePiConfigHome, resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { CHILD_SKILLS_CATALOG_ENV, REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
+import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { enforceAgentPolicy, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { HOOK_CONTEXT_MESSAGE_TYPE, HOOK_EVENT, STATUS_COMMAND, SYNC_COMMAND } from "../lib/claude-compat/constants.ts";
 import { markClaudeCompatGuardActive } from "../lib/claude-compat/guard-signal.ts";
@@ -19,6 +20,25 @@ export interface ClaudeCompatDependencies {
 }
 
 const ASK_TITLE = "Un hook de Claude Code pide confirmación";
+const UNREADABLE_STATE_GUARD_REASON = `estado de importación ilegible; reparar o ejecutar /${SYNC_COMMAND}`;
+
+/**
+ * Guards to enforce when `state.json` cannot be read: every reviewed
+ * `PreToolUse` hook in `claude-compat.json` becomes an unavailable guard, so
+ * the calls it matches stay blocked. Without a readable config the reviewed
+ * guards are unknown, so `blockAllReason` refuses every tool call.
+ */
+function guardsForUnreadableState(configHome: string): { guards: ResolvedHook[]; blockAllReason?: string } {
+	try {
+		const guards = loadClaudeCompatConfig(configHome).hooks
+			.filter((hook) => hook.event === HOOK_EVENT.PRE_TOOL_USE)
+			.map((hook): ResolvedHook => ({ id: hook.id, event: hook.event, ...(hook.tools ? { tools: hook.tools } : {}), unavailable: UNREADABLE_STATE_GUARD_REASON }));
+		return { guards };
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return { guards: [], blockAllReason: `claude-compat: state.json y claude-compat.json son ilegibles, así que no se puede saber qué guards revisados aplican; no se ejecutó la operación. Reparar claude-compat.json y state.json y ejecutar /${SYNC_COMMAND} (${detail})` };
+	}
+}
 
 function block(reason: string): ToolCallEventResult {
 	return { block: true, reason };
@@ -47,6 +67,8 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 		const child = env.GENTLE_PI_AGENTS_CHILD === "1";
 		let state: ClaudeCompatState | undefined;
 		let loadError: string | undefined;
+		let unreadableStateGuards: ResolvedHook[] = [];
+		let blockAllReason: string | undefined;
 		let pendingContext: string[] = [];
 
 		pi.on("tool_call", async (event, ctx) => {
@@ -60,7 +82,9 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 				const detail = error instanceof PolicyViolation ? error.message : `no se pudo validar la política (${error instanceof Error ? error.message : String(error)})`;
 				return block(`claude-compat: ${detail}`);
 			}
-			const preToolHooks = hooksFor(state, HOOK_EVENT.PRE_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName));
+			// An unreadable state must not silently drop the reviewed guards.
+			if (blockAllReason) return block(blockAllReason);
+			const preToolHooks = (loadError ? unreadableStateGuards : hooksFor(state, HOOK_EVENT.PRE_TOOL_USE)).filter((candidate) => hookAppliesToTool(candidate, event.toolName));
 			if (preToolHooks.length === 0) return undefined;
 			// A reviewed guard whose script vanished must not let matching calls through.
 			const unavailableGuard = preToolHooks.find((hook) => hook.unavailable !== undefined);
@@ -87,6 +111,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			state = readClaudeCompatState(agentHome);
 		} catch (error) {
 			loadError = error instanceof Error ? error.message : String(error);
+			({ guards: unreadableStateGuards, blockAllReason } = guardsForUnreadableState(configHome));
 		}
 
 		// Hidden markers bind a child to its policy through its exact --tools list.
@@ -128,7 +153,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 
 		pi.on("session_start", async (event, ctx) => {
 			pendingContext = [];
-			if (loadError) ctx.ui.notify(`claude-compat: importación ilegible; los agentes importados quedan bloqueados hasta corregirla. ${loadError}`, "warning");
+			if (loadError) ctx.ui.notify(`claude-compat: importación ilegible; los agentes importados${blockAllReason ? " y todas las herramientas" : unreadableStateGuards.length > 0 ? " y las herramientas que cubren los guards configurados" : ""} quedan bloqueados hasta corregirla. ${loadError}`, "warning");
 			await collectContext(ctx, event.reason === "new" ? "clear" : event.reason);
 		});
 

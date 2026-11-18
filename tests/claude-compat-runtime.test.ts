@@ -202,6 +202,42 @@ test("a reviewed PreToolUse guard whose script was removed fails closed; a missi
 	} finally { fixture.dispose(); }
 });
 
+test("an unreadable state keeps the configured PreToolUse guards blocking, refuses every call without a readable config, and leaves guard-free sessions working", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		mkdirSync(join(fixture.agentHome, "claude-import"), { recursive: true });
+		writeFileSync(claudeCompatStatePath(fixture.agentHome), "{ corrupt");
+		const notices: string[] = [];
+		const context = { cwd: fixture.root, hasUI: true, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async () => true, notify: (text: string) => notices.push(text) } } as unknown as ExtensionContext;
+		const bashCall = { toolName: "bash", toolCallId: "1", input: { command: "git push" } };
+		const readCall = { toolName: "read", toolCallId: "2", input: { path: "x" } };
+
+		const unguarded = harness({}, fixture).handlers;
+		assert.equal(await unguarded.get("tool_call")!(bashCall, context), undefined, "without claude-compat.json the main session keeps working");
+		assert.equal(await unguarded.get("tool_call")!(readCall, context), undefined);
+
+		const configPath = join(fixture.configHome, "claude-compat.json");
+		writeFileSync(configPath, JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [{ id: "push-guard", plugin: "guard", script: "hooks/push.mjs", event: "PreToolUse", tools: ["Bash"] }] }));
+		const guarded = harness({}, fixture).handlers;
+		const blocked = await guarded.get("tool_call")!(bashCall, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.match(blocked.reason, /guard push-guard no disponible \(estado de importación ilegible; reparar o ejecutar \/claude-compat:sync\)/);
+		assert.equal(await guarded.get("tool_call")!(readCall, context), undefined, "the guard only covers Bash");
+		const nativeChild = harness({ GENTLE_PI_AGENTS_CHILD: "1", [REQUESTED_TOOLS_ENV]: "bash" }, fixture).handlers;
+		assert.equal((await nativeChild.get("tool_call")!(bashCall, context) as { block: boolean }).block, true, "children of native agents keep the guard");
+		await guarded.get("session_start")!({ reason: "startup" }, context);
+		assert.match(notices.at(-1)!, /herramientas que cubren los guards configurados quedan bloqueados/);
+
+		writeFileSync(configPath, "{ broken");
+		const blind = harness({}, fixture).handlers;
+		for (const call of [bashCall, readCall]) {
+			const refused = await blind.get("tool_call")!(call, context) as { block: boolean; reason: string };
+			assert.equal(refused.block, true, `${call.toolName} is refused when no guard list can be read`);
+			assert.match(refused.reason, /Reparar claude-compat\.json y state\.json y ejecutar \/claude-compat:sync/);
+		}
+	} finally { fixture.dispose(); }
+});
+
 test("sync and status commands report the import; children get no import commands", async () => {
 	const fixture = createClaudeFixture();
 	try {

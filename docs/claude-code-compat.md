@@ -49,6 +49,7 @@ No toca `settings.json` de Pi ni de Claude Code. Un archivo derivado que editast
 ### Fallo cerrado
 
 El guard se registra antes de leer el estado. Si `state.json` es ilegible o la política no existe, el child de un agente importado se bloquea. Si un child carga solo el fallback curado de extensiones (sin `claude-compat`), `child-safety` bloquea a los agentes importados.
+Con `state.json` ilegible, cada guard `PreToolUse` de `claude-compat.json` bloquea las llamadas que cubre (y si `claude-compat.json` también es ilegible se bloquea toda herramienta) hasta reparar y ejecutar `/claude-compat:sync`.
 
 ## Hooks
 
