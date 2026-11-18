@@ -74,6 +74,46 @@ test("non-portable names are adapted in the derived cache with their resources; 
 	} finally { fixture.dispose(); }
 });
 
+test("plugin skills that use the plugin root placeholder get an adapted copy with the real root; the original keeps the placeholder", () => {
+	const fixture = createClaudeFixture();
+	try {
+		const command = 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/run.sh" and $CLAUDE_PLUGIN_ROOT/scripts/check.sh';
+		const root = fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"skills/runner/SKILL.md": `---\nname: runner\ndescription: Runs the plugin script\n---\n\nRun ${command}.\n`,
+		} });
+		fixture.write("home/.claude/skills/personal/SKILL.md", `---\nname: personal\ndescription: Personal\n---\n\nRun ${command}.\n`);
+		fixture.finalize();
+		const original = readFileSync(join(root, "skills/runner/SKILL.md"), "utf8");
+		const winners = Object.fromEntries(sync(fixture).skills.map((skill) => [skill.name, skill]));
+		const pluginRoot = root.replaceAll("\\", "/");
+		assert.equal(winners.runner.adapted, true);
+		const adapted = readFileSync(winners.runner.file, "utf8");
+		assert.ok(adapted.includes(`bash "${pluginRoot}/scripts/run.sh"`), "the braced placeholder points at the real plugin root");
+		assert.ok(adapted.includes(`and ${pluginRoot}/scripts/check.sh`), "the bare placeholder points at the real plugin root");
+		assert.ok(!adapted.includes("CLAUDE_PLUGIN_ROOT"));
+		assert.equal(readFileSync(join(root, "skills/runner/SKILL.md"), "utf8"), original);
+		assert.ok(original.includes("${CLAUDE_PLUGIN_ROOT}"));
+		assert.equal(winners.personal.adapted, false, "user skills have no plugin root to expand");
+	} finally { fixture.dispose(); }
+});
+
+test("adapting a skill without frontmatter name only touches the frontmatter, never a name line in the body", () => {
+	const fixture = createClaudeFixture();
+	try {
+		const example = "```yaml\nname: Production deployment\nreplicas: 2\n```";
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"skills/Deploy App/SKILL.md": `---\ndescription: Deploys the app\n---\n\nExample:\n\n${example}\n`,
+		} });
+		fixture.finalize();
+		const [skill] = sync(fixture).skills;
+		assert.equal(skill.name, "deploy-app");
+		assert.equal(skill.adapted, true);
+		const adapted = readFileSync(skill.file, "utf8");
+		assert.match(adapted, /^---\nname: deploy-app\ndescription: Deploys the app\n---\n/);
+		assert.ok(adapted.includes(example), "the body example keeps its own name line");
+	} finally { fixture.dispose(); }
+});
+
 test("adapted skill resources keep the owner execute bit and stay private to group and others", { skip: process.platform === "win32" }, () => {
 	const fixture = createClaudeFixture();
 	try {

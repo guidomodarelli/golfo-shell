@@ -31,6 +31,8 @@ export const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const SKILL_NAME_MAX_LENGTH = 64;
 /** Companion directories copied next to an adapted SKILL.md so relative links keep working. */
 export const SKILL_RESOURCE_DIRECTORIES = ["references", "scripts", "assets"] as const;
+/** Plugin root placeholder Claude Code expands in plugin content (`${CLAUDE_PLUGIN_ROOT}` or `$CLAUDE_PLUGIN_ROOT`); Pi tools never receive it. */
+export const CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT(?![A-Za-z0-9_])/g;
 /** Skill entry file name. */
 export const SKILL_FILE_NAME = "SKILL.md";
 

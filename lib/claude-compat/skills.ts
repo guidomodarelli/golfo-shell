@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { CLAUDE_COMPAT_IMPORT_DIRECTORY, CLAUDE_COMPAT_SKILLS_DIRECTORY, CLAUDE_COMPAT_STATE_SCHEMA, SKILL_FILE_NAME, SKILL_NAME_MAX_LENGTH, SKILL_NAME_PATTERN, SKILL_RESOURCE_DIRECTORIES } from "./constants.ts";
+import { CLAUDE_COMPAT_IMPORT_DIRECTORY, CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN, CLAUDE_COMPAT_SKILLS_DIRECTORY, CLAUDE_COMPAT_STATE_SCHEMA, SKILL_FILE_NAME, SKILL_NAME_MAX_LENGTH, SKILL_NAME_PATTERN, SKILL_RESOURCE_DIRECTORIES } from "./constants.ts";
 import { findMarkdownFiles, isInside, type ManagedFiles, OWNER_EXECUTE_BIT, PRIVATE_EXECUTABLE_FILE_MODE, PRIVATE_FILE_MODE, readFrontmatter, writeManagedFile } from "./files.ts";
 import { claudeDirectory, type ClaudePlugin, manifestPaths } from "./plugins.ts";
 
@@ -94,11 +94,33 @@ function copyResources(source: string, target: string, previous: ManagedFiles, w
 	}
 }
 
-function adaptedSkillContent(content: string, name: string, originalDirectory: string): string {
-	const renamed = /^(---\r?\n[\s\S]*?^name:[ \t]*).*$/m.test(content)
-		? content.replace(/^(---\r?\n[\s\S]*?^name:[ \t]*).*$/m, `$1${name}`)
-		: content.replace(/^---\r?\n/, `---\nname: ${name}\n`);
-	return `${renamed.trimEnd()}\n\n<!-- ${CLAUDE_COMPAT_STATE_SCHEMA} -->\nCopia adaptada por claude-compat. Directorio original de recursos: ${originalDirectory.split(sep).join("/")}. Resolver allí cualquier referencia relativa que no esté junto a esta copia; el original permanece intacto.\n`;
+/** Frontmatter block of a SKILL.md: opening fence, YAML lines and closing fence (with its line break). */
+const FRONTMATTER_BLOCK_PATTERN = /^(---\r?\n)([\s\S]*?)(\r?\n---[ \t]*(?:\r?\n|$))/;
+/** `name:` line of the frontmatter YAML. */
+const FRONTMATTER_NAME_LINE_PATTERN = /^(name:[ \t]*).*$/m;
+
+/** Sets `name:` inside the frontmatter only; the body, including YAML examples, stays untouched. */
+function renameFrontmatter(content: string, name: string): string {
+	const block = FRONTMATTER_BLOCK_PATTERN.exec(content);
+	if (!block) return content;
+	const [whole, opening, yaml, closing] = block;
+	const renamedYaml = FRONTMATTER_NAME_LINE_PATTERN.test(yaml) ? yaml.replace(FRONTMATTER_NAME_LINE_PATTERN, `$1${name}`) : `name: ${name}\n${yaml}`;
+	return `${opening}${renamedYaml}${closing}${content.slice(whole.length)}`;
+}
+
+function hasPluginRootPlaceholder(content: string): boolean {
+	return content.search(CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN) !== -1;
+}
+
+/** Pi tools do not receive `CLAUDE_PLUGIN_ROOT`, so plugin skills get the real root written in. */
+function expandPluginRoot(content: string, pluginRoot: string): string {
+	return content.replace(CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN, () => pluginRoot.split(sep).join("/"));
+}
+
+function adaptedSkillContent(content: string, name: string, originalDirectory: string, pluginRoot: string | undefined): string {
+	const renamed = renameFrontmatter(content, name);
+	const expanded = pluginRoot ? expandPluginRoot(renamed, pluginRoot) : renamed;
+	return `${expanded.trimEnd()}\n\n<!-- ${CLAUDE_COMPAT_STATE_SCHEMA} -->\nCopia adaptada por claude-compat. Directorio original de recursos: ${originalDirectory.split(sep).join("/")}. Resolver allí cualquier referencia relativa que no esté junto a esta copia; el original permanece intacto.\n`;
 }
 
 /**
@@ -131,12 +153,13 @@ export function buildSkillCatalog(options: {
 			continue;
 		}
 		const original = realpathSync(candidate.file);
-		const needsAdaptation = sourceName !== name || basename(dirname(original)) !== name;
+		const pluginRoot = candidate.owner === USER_SKILL_OWNER ? undefined : candidate.root;
+		const needsAdaptation = sourceName !== name || basename(dirname(original)) !== name || (pluginRoot !== undefined && hasPluginRootPlaceholder(content));
 		let file = original;
 		if (needsAdaptation) {
 			const target = join(cacheRoot, name, SKILL_FILE_NAME);
 			try {
-				writeManagedFile(target, adaptedSkillContent(content, name, dirname(original)), options.previous, options.written);
+				writeManagedFile(target, adaptedSkillContent(content, name, dirname(original), pluginRoot), options.previous, options.written);
 				for (const directory of SKILL_RESOURCE_DIRECTORIES) copyResources(join(dirname(original), directory), join(dirname(target), directory), options.previous, options.written);
 			} catch (error) {
 				skipped.push({ file: candidate.file, reason: error instanceof Error ? error.message : String(error) });
