@@ -1,5 +1,7 @@
 import type { ExtensionAPI, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import { REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
 import { SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
+import { claudeCompatGuardActive, requestsImportedPolicy } from "../lib/claude-compat/guard-signal.ts";
 import { recognizeDestructiveCommands } from "../lib/destructive-command-guard.ts";
 import { evaluateExecutionSurfaceTool } from "../lib/execution-surface-guard.ts";
 
@@ -14,6 +16,11 @@ export function createChildSafetyExtension(env: NodeJS.ProcessEnv = process.env)
 	return (pi) => {
 		if (env.GENTLE_PI_AGENTS_CHILD !== "1") return;
 		pi.on("tool_call", (event) => {
+			// golfo-shell#4: an imported Claude Code agent is only safe with its
+			// policy guard loaded; without it (e.g. the frozen curated fallback) refuse.
+			if (requestsImportedPolicy(env, REQUESTED_TOOLS_ENV) && !claudeCompatGuardActive()) {
+				return { block: true, reason: "Gentle AI child safety blocked an imported Claude Code agent: its claude-compat policy guard is not loaded in this child, so its tool allowlist cannot be enforced." };
+			}
 			const surfaceDenied = evaluateExecutionSurfaceTool(event.toolName, event.input);
 			if (surfaceDenied) return surfaceDenied;
 			const command = (event.input as { command?: unknown }).command;
