@@ -26,6 +26,13 @@ export interface SkillDuplicate {
 	excluded: string;
 }
 
+/** Skill left out because `skillOverrides` sets one of its names to `"off"`. */
+export interface DisabledSkill {
+	/** Override key that matched: the original name or the portable one. */
+	override: string;
+	file: string;
+}
+
 export interface SkippedSkill {
 	file: string;
 	reason: string;
@@ -35,12 +42,15 @@ export interface SkillCatalog {
 	skills: SelectedSkill[];
 	duplicates: SkillDuplicate[];
 	skipped: SkippedSkill[];
+	disabled: DisabledSkill[];
 }
 
 interface SkillCandidate {
 	file: string;
 	owner: string;
 	root: string;
+	/** Plugin name Claude Code prefixes to the skill (`<plugin>:<skill>`); absent for user skills. */
+	pluginName?: string;
 }
 
 /**
@@ -71,7 +81,7 @@ function pluginSkillFiles(plugin: ClaudePlugin): string[] {
  */
 export function skillCandidates(home: string, plugins: readonly ClaudePlugin[]): SkillCandidate[] {
 	const candidates: SkillCandidate[] = [];
-	for (const plugin of plugins) candidates.push(...pluginSkillFiles(plugin).map((file) => ({ file, owner: plugin.key, root: plugin.root })));
+	for (const plugin of plugins) candidates.push(...pluginSkillFiles(plugin).map((file) => ({ file, owner: plugin.key, root: plugin.root, pluginName: plugin.name })));
 	const userRoot = join(claudeDirectory(home), "skills");
 	candidates.push(...findMarkdownFiles(userRoot, SKILL_FILE_NAME).map((file) => ({ file, owner: USER_SKILL_OWNER, root: userRoot })));
 	return candidates;
@@ -108,6 +118,20 @@ function renameFrontmatter(content: string, name: string): string {
 	return `${opening}${renamedYaml}${closing}${content.slice(whole.length)}`;
 }
 
+/**
+ * Names an override may use for a candidate: the declared one, its portable
+ * form and, for plugin skills, the `<plugin>:<skill>` name Claude Code shows
+ * (never prefixed twice) with its portable form.
+ */
+function overrideNames(sourceName: string, name: string | undefined, pluginName: string | undefined): string[] {
+	const names = [sourceName, name];
+	if (pluginName && !sourceName.startsWith(`${pluginName}:`)) {
+		const qualified = `${pluginName}:${sourceName}`;
+		names.push(qualified, normalizeSkillName(qualified));
+	}
+	return names.filter((candidateName): candidateName is string => candidateName !== undefined);
+}
+
 function hasPluginRootPlaceholder(content: string): boolean {
 	return content.search(CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN) !== -1;
 }
@@ -125,19 +149,26 @@ function adaptedSkillContent(content: string, name: string, originalDirectory: s
 
 /**
  * Selects one skill per portable name before Pi loads anything. Names Pi
- * already discovers natively keep priority and are never shadowed.
+ * already discovers natively keep priority and are never shadowed. Candidates
+ * whose original or portable name `skillOverrides` turns `"off"` are dropped
+ * before choosing winners or writing copies, so no older version or duplicate
+ * brings them back; Pi's native skills are not affected.
  */
 export function buildSkillCatalog(options: {
 	home: string;
 	agentHome: string;
 	plugins: readonly ClaudePlugin[];
 	nativeSkillNames: ReadonlySet<string>;
+	/** Names `skillOverrides` sets to `"off"`. */
+	disabledSkillNames?: ReadonlySet<string>;
 	previous: ManagedFiles;
 	written: ManagedFiles;
 }): SkillCatalog {
 	const selected = new Map<string, SelectedSkill>();
 	const duplicates: SkillDuplicate[] = [];
 	const skipped: SkippedSkill[] = [];
+	const disabled: DisabledSkill[] = [];
+	const disabledNames = options.disabledSkillNames ?? new Set<string>();
 	const cacheRoot = join(options.agentHome, CLAUDE_COMPAT_IMPORT_DIRECTORY, CLAUDE_COMPAT_SKILLS_DIRECTORY);
 	for (const candidate of skillCandidates(options.home, options.plugins)) {
 		const content = readFileSync(candidate.file, "utf8");
@@ -145,6 +176,8 @@ export function buildSkillCatalog(options: {
 		if (!present || !fields.description?.trim()) { skipped.push({ file: candidate.file, reason: "sin frontmatter con description" }); continue; }
 		const sourceName = fields.name?.trim() || basename(dirname(candidate.file));
 		const name = normalizeSkillName(sourceName);
+		const override = overrideNames(sourceName, name, candidate.pluginName).find((candidateName) => disabledNames.has(candidateName));
+		if (override !== undefined) { disabled.push({ override, file: candidate.file }); continue; }
 		if (!name) { skipped.push({ file: candidate.file, reason: `nombre sin adaptación portable: ${sourceName}` }); continue; }
 		if (options.nativeSkillNames.has(name)) { duplicates.push({ name, selected: "pi-native", excluded: candidate.file }); continue; }
 		const winner = selected.get(name);
@@ -169,7 +202,7 @@ export function buildSkillCatalog(options: {
 		}
 		selected.set(name, { name, sourceName, file, original, owner: candidate.owner, adapted: needsAdaptation });
 	}
-	return { skills: [...selected.values()], duplicates, skipped };
+	return { skills: [...selected.values()], duplicates, skipped, disabled };
 }
 
 /** Skill names Pi discovers by itself, read from the directories its package manager scans. */

@@ -21,6 +21,7 @@ export function formatClaudeCompatReport(state: ClaudeCompatState): string {
 		`claude-compat: ${state.plugins.length} plugins, ${state.skills.length} skills (${adaptedSkills.length} adaptadas), ${state.agents.length} agentes, ${state.hooks.length - unavailableGuards.length} hooks revisados.`,
 		...section("Skills renombradas/adaptadas en caché derivada", adaptedSkills.map((skill) => `${skill.sourceName} → ${skill.name}`)),
 		...section("Skills duplicadas (se conservó la primera)", state.duplicates.map((duplicate) => `${duplicate.name}: excluida ${duplicate.excluded} (gana ${duplicate.selected})`)),
+		...section("Skills desactivadas por skillOverrides (\"off\")", (state.disabledSkills ?? []).map((skill) => `${skill.override}: ${skill.file}`)),
 		...section("Skills omitidas", state.skippedSkills.map((skill) => `${skill.file}: ${skill.reason}`)),
 		...section("Plugins no importados", state.skippedPlugins.map((plugin) => `${plugin.key}: ${plugin.reason}`)),
 		...section("Herramientas sin equivalente (no se conceden)", unsupported.map((policy) => `${policy.name}: ${policy.unsupported.join(", ")}`)),

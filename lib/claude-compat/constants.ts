@@ -35,6 +35,8 @@ export const SKILL_RESOURCE_DIRECTORIES = ["references", "scripts", "assets"] as
 export const CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT(?![A-Za-z0-9_])/g;
 /** Skill entry file name. */
 export const SKILL_FILE_NAME = "SKILL.md";
+/** `skillOverrides` value in `~/.claude/settings.json` that keeps a skill out of the import (golfo-shell#6). */
+export const SKILL_OVERRIDE_DISABLED = "off";
 
 /** Bounded directory walk: deeper trees are ignored, never followed. */
 export const MAX_SCAN_DEPTH = 12;
