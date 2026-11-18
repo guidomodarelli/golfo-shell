@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { BASH_BACKGROUND_TOOL, MONITOR_TOOL, SHELL_COMMAND_TOOLS } from "../background-jobs.ts";
 import { piMcpToolName } from "./agents.ts";
 import type { ReviewedHook } from "./config.ts";
-import { HOOK_EVENT, MCP_SEGMENT_SEPARATOR, MCP_TOOL_PREFIX, PI_TO_CLAUDE_TOOL, type SupportedHookEvent } from "./constants.ts";
+import { HOOK_EVENT, MCP_SEGMENT_SEPARATOR, MCP_TOOL_PREFIX, PI_BASH_TOOL, PI_TO_CLAUDE_TOOL, type SupportedHookEvent } from "./constants.ts";
 import { pluginFile, readJsonFile } from "./files.ts";
 import { type ClaudePlugin, readClaudeSettings } from "./plugins.ts";
 import { runHookScript } from "./process.ts";
@@ -180,16 +181,27 @@ function editsOf(input: InputRecord): PiEdit[] | undefined {
 }
 
 /**
+ * Claude Code tool name for a Pi tool, or `undefined` when it has none. Every
+ * tool that runs a shell command is `Bash`, so a reviewed Bash guard cannot be
+ * bypassed by launching the same command through a background tool.
+ */
+function claudeToolNameOf(piToolName: string): string | undefined {
+	return SHELL_COMMAND_TOOLS.has(piToolName) ? CLAUDE_TOOL.BASH : PI_TO_CLAUDE_TOOL[piToolName];
+}
+
+/**
  * Translates a Pi tool call into the `tool_name`/`tool_input` a Claude Code
  * hook expects: `path` → absolute `file_path`, Pi edits → `Edit` (one) or
- * `MultiEdit` (several), bash timeout seconds → milliseconds. Returns
+ * `MultiEdit` (several), bash timeout seconds → milliseconds, and every shell
+ * command tool (`bash_background`, `monitor`) → `Bash` with
+ * `run_in_background: true`, so a reviewed Bash guard sees them all. Returns
  * `undefined` when a known tool's input does not have the shape Pi declares,
  * so callers fail closed instead of handing a reviewed hook fields it would not
  * recognize. Tools without a Claude Code counterpart keep their name and input.
  */
 export function translateToolInput(piToolName: string, input: unknown, cwd: string): ClaudeToolCall | undefined {
 	if (!isRecord(input)) return undefined;
-	const claudeName = PI_TO_CLAUDE_TOOL[piToolName];
+	const claudeName = claudeToolNameOf(piToolName);
 	switch (claudeName) {
 		case undefined:
 			return { toolName: piToolName, input };
@@ -206,9 +218,15 @@ export function translateToolInput(piToolName: string, input: unknown, cwd: stri
 			if (edits.length === 1) return { toolName: CLAUDE_TOOL.EDIT, input: { file_path: filePath, old_string: edits[0].oldText, new_string: edits[0].newText } };
 			return { toolName: CLAUDE_TOOL.MULTI_EDIT, input: { file_path: filePath, edits: edits.map((edit) => ({ old_string: edit.oldText, new_string: edit.newText })) } };
 		}
-		case CLAUDE_TOOL.BASH:
-			if (typeof input.command !== "string" || !isOptional(input.timeout, "number")) return undefined;
-			return { toolName: claudeName, input: withoutUndefined({ command: input.command, timeout: typeof input.timeout === "number" ? input.timeout * MILLISECONDS_PER_SECOND : undefined }) };
+		case CLAUDE_TOOL.BASH: {
+			const timeoutSeconds = piToolName === MONITOR_TOOL ? input.timeout_seconds : piToolName === BASH_BACKGROUND_TOOL ? undefined : input.timeout;
+			if (typeof input.command !== "string" || !isOptional(timeoutSeconds, "number")) return undefined;
+			return { toolName: claudeName, input: withoutUndefined({
+				command: input.command,
+				timeout: typeof timeoutSeconds === "number" ? timeoutSeconds * MILLISECONDS_PER_SECOND : undefined,
+				run_in_background: piToolName === PI_BASH_TOOL ? undefined : true,
+			}) };
+		}
 		case CLAUDE_TOOL.GREP:
 			if (typeof input.pattern !== "string" || !isOptional(input.path, "string") || !isOptional(input.glob, "string") || !isOptional(input.ignoreCase, "boolean") || !isOptional(input.context, "number") || !isOptional(input.limit, "number")) return undefined;
 			return { toolName: claudeName, input: withoutUndefined({ pattern: input.pattern, path: typeof input.path === "string" ? absolutePath(input.path, cwd) : undefined, glob: input.glob, "-i": input.ignoreCase, "-C": input.context, head_limit: input.limit }) };
@@ -303,7 +321,7 @@ function mcpMatcherCovers(matcher: string, piToolName: string): boolean {
 /** Whether a reviewed tool hook applies to this Pi tool. */
 export function hookAppliesToTool(hook: ResolvedHook, piToolName: string): boolean {
 	if (!hook.tools) return true;
-	const claudeName = PI_TO_CLAUDE_TOOL[piToolName] ?? piToolName;
+	const claudeName = claudeToolNameOf(piToolName) ?? piToolName;
 	const names = EQUIVALENT_CLAUDE_TOOLS[claudeName] ?? [claudeName];
 	return hook.tools.some((tool) => names.includes(tool) || mcpMatcherCovers(tool, piToolName));
 }

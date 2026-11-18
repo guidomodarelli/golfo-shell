@@ -7,6 +7,7 @@ import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import { createClaudeCompatExtension } from "../extensions/claude-compat.ts";
 import { REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
+import { BASH_BACKGROUND_TOOL, MONITOR_TOOL } from "../lib/background-jobs.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { claudeCompatStatePath, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
@@ -171,6 +172,30 @@ test("a reviewed PreToolUse hook sees Claude Code's tool_input: a .env guard blo
 		assert.equal(await call("write", { path: "x/app.ts", content: "" }), undefined);
 		assert.match((await call("edit", { path: "x/.env", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }))!.reason, /MultiEdit .*\.env/, "Edit matcher covers MultiEdit");
 		const unrepresentable = await call("edit", { path: "x/app.ts", edits: [] });
+		assert.equal(unrepresentable?.block, true);
+		assert.match(unrepresentable!.reason, /no se puede representar/);
+	} finally { fixture.dispose(); }
+});
+
+test("a reviewed Bash PreToolUse guard also blocks the same command launched through bash_background or monitor", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		const rmGuard = "let data='';process.stdin.on('data',(c)=>data+=c).on('end',()=>{const p=JSON.parse(data);const c=String(p.tool_input.command??'');process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:/rm -rf/.test(c)?'deny':'allow',permissionDecisionReason:p.tool_name+' '+c+' background='+p.tool_input.run_in_background}}))});";
+		fixture.plugin({ key: "guard@market", version: "1.0.0", files: { "hooks/rm.mjs": rmGuard } });
+		fixture.finalize();
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [{ id: "rm", plugin: "guard", script: "hooks/rm.mjs", event: "PreToolUse", tools: ["Bash"] }] }));
+		synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		const context = { cwd: fixture.root, hasUI: false, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async () => false, notify() {} } } as unknown as ExtensionContext;
+		const toolCall = harness({}, fixture).handlers.get("tool_call")!;
+		const call = (toolName: string, input: Record<string, unknown>) => toolCall({ toolName, toolCallId: "1", input }, context) as Promise<{ block: boolean; reason: string } | undefined>;
+		for (const [toolName, input] of [["bash", { command: "rm -rf data" }], [BASH_BACKGROUND_TOOL, { command: "rm -rf data" }], [MONITOR_TOOL, { command: "rm -rf data", timeout_seconds: 30 }]] as const) {
+			const denied = await call(toolName, input);
+			assert.equal(denied?.block, true, `${toolName} runs through the Bash guard`);
+			assert.match(denied!.reason, /Bash rm -rf data/);
+			assert.equal(await call(toolName, { ...input, command: "ls" }), undefined, `${toolName} keeps running commands the guard allows`);
+		}
+		assert.match((await call(BASH_BACKGROUND_TOOL, { command: "rm -rf data" }))!.reason, /background=true/);
+		const unrepresentable = await call(BASH_BACKGROUND_TOOL, { command: 1 });
 		assert.equal(unrepresentable?.block, true);
 		assert.match(unrepresentable!.reason, /no se puede representar/);
 	} finally { fixture.dispose(); }

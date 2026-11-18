@@ -7,6 +7,7 @@ import { splitToolList, translateTools } from "../lib/claude-compat/agents.ts";
 import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
 import { readFrontmatter } from "../lib/claude-compat/files.ts";
+import { BASH_BACKGROUND_TOOL, MONITOR_TOOL, SHELL_COMMAND_TOOLS } from "../lib/background-jobs.ts";
 import { callReviewedHook, claudeToolNameForHook, decodeHookResult, hookAppliesToTool, translateToolInput } from "../lib/claude-compat/hooks.ts";
 import { runProcess } from "../lib/claude-compat/process.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
@@ -405,6 +406,18 @@ test("Pi tool input reaches hooks with Claude Code names: absolute file_path, Ed
 	assert.equal(hookAppliesToTool(editHook, "edit"), true, "MultiEdit matcher covers Pi edit");
 	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Edit"] }, "edit"), true);
 	assert.equal(hookAppliesToTool({ ...editHook, tools: ["Write"] }, "edit"), false);
+});
+
+test("a reviewed Bash hook covers every Pi tool that runs a shell command, with Claude Code Bash input", () => {
+	const cwd = resolve("project");
+	const bashHook = { id: "bash-guard", event: "PreToolUse" as const, tools: ["Bash"], script: "x", root: cwd };
+	for (const tool of SHELL_COMMAND_TOOLS) assert.equal(hookAppliesToTool(bashHook, tool), true, `${tool} is covered by a Bash matcher`);
+	assert.equal(hookAppliesToTool(bashHook, "read"), false);
+	assert.deepEqual(translateToolInput(BASH_BACKGROUND_TOOL, { command: "rm -rf build", label: "clean" }, cwd), { toolName: "Bash", input: { command: "rm -rf build", run_in_background: true } });
+	assert.deepEqual(translateToolInput(MONITOR_TOOL, { command: "tail -f app.log", timeout_seconds: 60 }, cwd), { toolName: "Bash", input: { command: "tail -f app.log", timeout: 60_000, run_in_background: true } });
+	for (const [tool, input] of [[BASH_BACKGROUND_TOOL, {}], [BASH_BACKGROUND_TOOL, { command: 1 }], [MONITOR_TOOL, { command: "x", timeout_seconds: "5" }]] as const) {
+		assert.equal(translateToolInput(tool, input, cwd), undefined, `${tool} ${JSON.stringify(input)}`);
+	}
 });
 
 test("a reviewed hook configured with Claude Code MCP names covers the Pi calls whose server Pi normalized", () => {
