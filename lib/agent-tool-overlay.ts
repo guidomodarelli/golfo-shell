@@ -115,3 +115,32 @@ export function applyToolOverlay(tools: string[], overlay: ToolOverlayEntry | un
 	const removeSet = new Set(overlay.remove);
 	return [...new Set([...tools, ...overlay.add])].filter((tool) => !removeSet.has(tool));
 }
+
+/** Outcome of an overlay applied with protected tool names. */
+export interface GuardedToolOverlayResult {
+	/** Final tool list: the overlay result with every protected name restored to the original definition. */
+	tools: string[];
+	/** Protected names the overlay tried to add or remove and that were ignored. */
+	ignored: string[];
+}
+
+/**
+ * Apply an overlay without letting it edit protected tool names (for example
+ * the claude-compat policy markers that bind a child to its imported policy):
+ * protected names of the original definition are always kept and protected
+ * names the overlay adds are dropped. Every other add/remove behaves exactly
+ * like `applyToolOverlay`.
+ */
+export function applyGuardedToolOverlay(tools: string[], overlay: ToolOverlayEntry | undefined, protectedPrefixes: readonly string[]): GuardedToolOverlayResult {
+	if (overlay === undefined) return { tools, ignored: [] };
+	const isProtected = (tool: string): boolean => protectedPrefixes.some((prefix) => tool.startsWith(prefix));
+	const ignored = [
+		...overlay.add.filter((tool) => isProtected(tool) && !tools.includes(tool)),
+		...overlay.remove.filter((tool) => isProtected(tool) && tools.includes(tool)),
+	];
+	const editable: ToolOverlayEntry = {
+		add: overlay.add.filter((tool) => !isProtected(tool)),
+		remove: overlay.remove.filter((tool) => !isProtected(tool)),
+	};
+	return { tools: applyToolOverlay(tools, editable), ignored: [...new Set(ignored)] };
+}

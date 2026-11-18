@@ -87,3 +87,41 @@ test("discoverAgents applies the overlay and reports overlay keys naming no agen
 	assert.deepEqual(worker.tools, ["read", "bash_background"]);
 	assert.ok(notices.includes('overlay names unknown agent "ghost"'));
 });
+
+test("discoverAgents keeps claude-compat policy markers that an overlay tries to remove and ignores markers it adds", (t) => {
+	const root = tempRoot();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const cwd = join(root, "cwd");
+	const agentHome = join(root, "agent");
+	const configHome = join(root, "config");
+	mkdirSync(join(agentHome, "agents"), { recursive: true });
+	writeFileSync(join(agentHome, "agents", "claude-git-reader.md"), "---\nname: claude-git-reader\ntools:\n  - bash\n  - claude_policy_git_reader\n---\nbody");
+	writeJson(join(configHome, "tools.json"), {
+		"claude-git-reader": { add: ["claude_policy_other", "grep"], remove: ["claude_policy_git_reader"] },
+	});
+	writeJson(join(cwd, ".pi", "gentle-ai", "tools.json"), { "claude-git-reader": { remove: ["bash"] } });
+
+	const { agents, errors, notices } = discoverAgents({ cwd, home: join(root, "home"), agentHome, configHome });
+	assert.deepEqual(errors, []);
+	const agent = agents.find((candidate) => candidate.name === "claude-git-reader");
+	assert.ok(agent, "the imported agent must be discovered");
+	assert.deepEqual(agent.tools, ["claude_policy_git_reader", "grep"]);
+	const markerNotice = notices.find((notice) => notice.includes("claude-compat policy markers") && notice.includes('"claude-git-reader"'));
+	assert.ok(markerNotice, "ignoring a policy marker edit must be reported");
+	assert.ok(markerNotice.includes("claude_policy_git_reader") && markerNotice.includes("claude_policy_other"));
+});
+
+test("discoverAgents reports no marker notice when the overlay leaves policy markers untouched", (t) => {
+	const root = tempRoot();
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const cwd = join(root, "cwd");
+	const agentHome = join(root, "agent");
+	const configHome = join(root, "config");
+	mkdirSync(join(agentHome, "agents"), { recursive: true });
+	writeFileSync(join(agentHome, "agents", "claude-git-reader.md"), "---\nname: claude-git-reader\ntools:\n  - bash\n  - claude_policy_git_reader\n---\nbody");
+	writeJson(join(configHome, "tools.json"), { "claude-git-reader": { add: ["claude_policy_git_reader", "read"] } });
+
+	const { agents, notices } = discoverAgents({ cwd, home: join(root, "home"), agentHome, configHome });
+	assert.deepEqual(agents.find((candidate) => candidate.name === "claude-git-reader")?.tools, ["bash", "claude_policy_git_reader", "read"]);
+	assert.equal(notices.some((notice) => notice.includes("claude-compat policy markers")), false);
+});

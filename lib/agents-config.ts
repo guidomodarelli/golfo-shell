@@ -1,9 +1,10 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { gentlePiConfigHome } from "./agent-home.ts";
-import { applyToolOverlay, loadToolOverlays } from "./agent-tool-overlay.ts";
+import { applyGuardedToolOverlay, loadToolOverlays } from "./agent-tool-overlay.ts";
 import type { AgentProfilesFile } from "./agent-profiles.ts";
 import { DEFAULT_REPORT_MAX_BYTES } from "./agents-report-cap.ts";
+import { POLICY_TOOL_PREFIX } from "./claude-compat/constants.ts";
 import { THINKING_LEVELS as ROUTING_THINKING_LEVELS, isServiceTier, type AgentModelConfig, type ServiceTier, type ThinkingLevel as RoutingThinkingLevel } from "./model-routing-authority.ts";
 
 // Gentle Agents configuration. Agent definitions are markdown files with YAML
@@ -239,7 +240,9 @@ export function discoverAgents(roots: DiscoveryRoots): DiscoveryResult {
 			const parsed = parseAgentDefinition(readFileSync(filePath, "utf8"), filePath, scope);
 			if ("error" in parsed) errors.push(`${filePath}: ${parsed.error}`);
 			else {
-				const tools = applyToolOverlay(parsed.tools, overlays.entries[parsed.name]);
+				// claude-compat policy markers bind a child to its imported policy; an overlay must never edit them.
+				const { tools, ignored } = applyGuardedToolOverlay(parsed.tools, overlays.entries[parsed.name], [POLICY_TOOL_PREFIX]);
+				if (ignored.length > 0) overlays.notices.push(`ignored overlay changes to claude-compat policy markers for "${parsed.name}" (${ignored.join(", ")}): policy markers cannot be edited with tool overlays`);
 				agents.set(parsed.name, { ...parsed, tools });
 			}
 		}
