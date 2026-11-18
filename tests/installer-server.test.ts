@@ -13,6 +13,7 @@ import { PI_INSTALL_VERSION, blockedReasons, failedSteps, runStandardInstall } f
 import { createProbes } from "../scripts/installer-probes.mjs";
 import { createInstallerServer, guidance } from "../scripts/installer-server.mjs";
 import { distributionAsset, prefixLayout } from "../scripts/bundled-install.mjs";
+import { FAILURE_KIND, downloadDiagnostic, pnpmInstallDiagnostic } from "../scripts/installer-diagnostics.mjs";
 import { bundledBlockedReasons, bundledFailedSteps, bundledPlan } from "../scripts/bundled-wizard.mjs";
 
 type Response = { status: number; headers: Record<string, string | string[] | undefined>; body: string };
@@ -1627,6 +1628,50 @@ test("/api/plan describes the bundled install: its own pinned runtimes, the user
 		} finally {
 			await server.host.close("test");
 		}
+	}
+});
+
+/** The outcome view the real server builds for a runner result, through the HTTP install flow. */
+async function bundledOutcomeView(result: Record<string, unknown>) {
+	const { host, port, login } = await start({ runInstall: async () => result as never });
+	try {
+		const cookie = await login();
+		const { planId } = await plan(port, cookie);
+		assert.equal((await post(port, "/api/install", cookie, { planId, consent: true })).status, 202);
+		await waitFor(() => host.outcome() !== null);
+		return host.outcome() as Record<string, unknown>;
+	} finally {
+		await host.close("test");
+	}
+}
+
+test("bundled install-runtime and install-version failures get guidance by their classified diagnostic", async () => {
+	const runtime = (kind: string, status?: number) => downloadDiagnostic({ name: "pnpm", version: "11.1.1", kind, status });
+	const version = (kind: string, status?: number) => pnpmInstallDiagnostic({ kind, status, package: "@aws-sdk/xml-builder@3.972.43" });
+	const cases: [string, string, string][] = [
+		["install-runtime", runtime(FAILURE_KIND.http, 403), guidance.runtimeRefused],
+		["install-runtime", runtime(FAILURE_KIND.http, 404), guidance.runtimeRefused],
+		["install-runtime", runtime(FAILURE_KIND.connection), guidance.runtimeUnreachable],
+		["install-runtime", runtime(FAILURE_KIND.tls), guidance.runtimeTls],
+		["install-runtime", runtime(FAILURE_KIND.integrity), guidance.runtimeIntegrity],
+		["install-runtime", runtime(FAILURE_KIND.size), guidance.failed["install-runtime"]],
+		["install-version", String(version(FAILURE_KIND.http, 403)), guidance.versionUnavailable],
+		["install-version", String(version(FAILURE_KIND.http, 404)), guidance.versionUnavailable],
+		["install-version", String(version(FAILURE_KIND.http, 401)), guidance.versionAuth],
+		["install-version", String(version(FAILURE_KIND.http, 407)), guidance.versionAuth],
+		["install-version", String(version(FAILURE_KIND.http, 500)), guidance.failed["install-version"]],
+		["install-version", String(version(FAILURE_KIND.connection)), guidance.versionUnreachable],
+		["install-version", String(version(FAILURE_KIND.tls)), guidance.versionTls],
+		["install-version", String(version(FAILURE_KIND.integrity)), guidance.versionIntegrity],
+	];
+	for (const [step, detail, expected] of cases) {
+		const view = await bundledOutcomeView({ outcome: "failed", failedStep: step, completed: ["claim-prefix"], detail });
+		assert.equal(view.detail, detail, `${step}: ${detail}`);
+		assert.equal(view.guidance, expected, `${step}: ${detail}`);
+	}
+	// The guidance never suggests weakening TLS or integrity, nor swapping the pinned versions.
+	for (const key of ["runtimeUnreachable", "runtimeRefused", "runtimeTls", "runtimeIntegrity", "versionUnavailable", "versionAuth", "versionUnreachable", "versionTls", "versionIntegrity"] as const) {
+		assert.doesNotMatch(guidance[key], /strict-ssl|NODE_TLS_REJECT_UNAUTHORIZED|--no-verify|downgrade|older version/i, key);
 	}
 });
 

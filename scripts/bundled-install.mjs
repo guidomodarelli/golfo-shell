@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { crc32, gunzipSync, inflateRawSync } from "node:zlib";
 import { acquireGo, artifactFor, engramPinVersion, uvPinVersion, verifiedDownload } from "./installer-downloads.mjs";
+import { classifyPnpmInstallOutput, pnpmInstallDiagnostic } from "./installer-diagnostics.mjs";
 import { ensureWindowsPrivateFolder, readWindowsPnpmArchive, verifyWindowsStorage } from "./installer-windows.mjs";
 
 // The acquisition pins already verified for the installer; never a second copy.
@@ -401,13 +402,15 @@ export async function renameWithWindowsRetry(from, to, { platform = process.plat
  * folders only (both archive readers reject links), so nothing points at the
  * staging path.
  */
-async function publishRuntime(layout, name, directory, entry, { platform, arch, adapters }, fill) {
-	const descriptor = (adapters.artifact ?? artifactFor)(name, platform, arch);
+async function publishRuntime(layout, name, directory, entry, { platform, arch, env = {}, adapters }, fill) {
+	// env selects only the authorized pnpm mirror; the marker keeps the canonical url.
+	const artifact = adapters.artifact ?? ((artifactName, artifactPlatform, artifactArch) => artifactFor(artifactName, artifactPlatform, artifactArch, { env }));
+	const descriptor = artifact(name, platform, arch);
 	if (ownedRuntime(directory, descriptor.url, entry)) return false;
 	if (stat(directory)) throw new Error(`Conflicting runtime destination: ${directory}`);
 	// Before downloading: a prefix that is not there fails without a download.
 	ensureDirectory(layout.runtime, layout.platform);
-	const bytes = await verifiedDownload(name, adapters, platform, arch);
+	const bytes = await verifiedDownload(name, { ...adapters, artifact }, platform, arch);
 	let stage = mkdtempSync(pathFor(process.platform).join(layout.runtime, ".stage-"));
 	try {
 		await fill(stage, bytes, descriptor);
@@ -431,7 +434,7 @@ export async function ensureEngram({ layout, platform, arch, env = {}, adapters 
 	const run = adapters.run ?? runCommand;
 	const path = pathFor(process.platform);
 	const childEnv = pnpmEnvironment(layout, { platform: layout.platform, env });
-	return publishRuntime(layout, "engram", layout.engramDir, layout.engram, { platform, arch, adapters }, async (stage, bytes, descriptor) => {
+	return publishRuntime(layout, "engram", layout.engramDir, layout.engram, { platform, arch, env, adapters }, async (stage, bytes, descriptor) => {
 		const binary = path.join(stage, path.relative(layout.engramDir, layout.engram));
 		writeFileSync(binary, engramExecutable(bytes, descriptor), { flag: "wx", mode: 0o700 });
 		const result = await run(binary, ["version"], { cwd: layout.runtime, env: childEnv });
@@ -462,7 +465,7 @@ export async function ensureUv({ layout, platform, arch, env = {}, adapters = {}
 	const run = adapters.run ?? runCommand;
 	const path = pathFor(process.platform);
 	const childEnv = pnpmEnvironment(layout, { platform: layout.platform, env });
-	return publishRuntime(layout, "uv", layout.uvDir, layout.uv, { platform, arch, adapters }, async (stage, bytes, descriptor) => {
+	return publishRuntime(layout, "uv", layout.uvDir, layout.uv, { platform, arch, env, adapters }, async (stage, bytes, descriptor) => {
 		const binary = path.join(stage, path.relative(layout.uvDir, layout.uv));
 		writeFileSync(binary, uvExecutable(bytes, descriptor), { flag: "wx", mode: 0o700 });
 		const result = await run(binary, ["--version"], { cwd: layout.runtime, env: childEnv });
@@ -537,7 +540,7 @@ export async function ensureRuntime({ layout, platform, arch, go = false, engram
 	const path = pathFor(process.platform);
 	const childEnv = pnpmEnvironment(layout, { platform: layout.platform, env });
 	const acquired = [];
-	const node = await publishRuntime(layout, "node", layout.nodeDir, layout.node, { platform, arch, adapters }, async (stage, bytes, descriptor) => {
+	const node = await publishRuntime(layout, "node", layout.nodeDir, layout.node, { platform, arch, env, adapters }, async (stage, bytes, descriptor) => {
 		const files = nodeRuntimeFiles(bytes, descriptor);
 		for (const file of files) {
 			const target = path.join(stage, ...file.name.split("/"));
@@ -554,7 +557,7 @@ export async function ensureRuntime({ layout, platform, arch, go = false, engram
 	// Also for a runtime published before the entry existed; one from before npm
 	// was published (T1a) has no npm to run, and the launcher then gives Pi none.
 	if (regular(layout.npmCli)) ensureNpmShim(layout);
-	const pnpm = await publishRuntime(layout, "pnpm", layout.pnpmDir, layout.pnpm, { platform, arch, adapters }, async (stage, bytes, descriptor) => {
+	const pnpm = await publishRuntime(layout, "pnpm", layout.pnpmDir, layout.pnpm, { platform, arch, env, adapters }, async (stage, bytes, descriptor) => {
 		// The tarball's executable bits are kept (bin/pnpm.mjs, dist/node-gyp-bin), for the owner only.
 		const modes = new Map([...tarMembers(bytes, "pnpm archive rejected")].map((member) => [member.name, member.mode]));
 		for (const entry of readWindowsPnpmArchive(bytes)) {
@@ -820,8 +823,10 @@ export async function installVersion({ layout, manifest, lockfile, unverified = 
 			{ cwd: destination, env: pnpmEnvironment(layout, { platform, env, go }), timeout: INSTALL_TIMEOUT });
 		// pnpm prints install and postinstall failures on stdout: keep both tails.
 		if (result.status !== 0) {
-			throw Object.assign(new Error(`pnpm install failed (exit ${result.status})`),
-				{ stderr: [String(result.stdout ?? "").slice(-6000), String(result.stderr ?? "").slice(-4000)].filter(Boolean).join("\n") });
+			const output = [String(result.stdout ?? "").slice(-6000), String(result.stderr ?? "").slice(-4000)].filter(Boolean).join("\n");
+			// A registry failure is named by its classified, URL-free diagnostic (connection, TLS, HTTP status, integrity).
+			const diagnostic = pnpmInstallDiagnostic(classifyPnpmInstallOutput(output));
+			throw Object.assign(new Error(`pnpm install failed (exit ${result.status})`), { stderr: output, ...(diagnostic ? { diagnostic } : {}) });
 		}
 		const shellDirectory = installedPackage(destination, "gentle-pi", shell, "gentle-pi");
 		installedPackage(destination, PI_PACKAGE, pi, "Pi");

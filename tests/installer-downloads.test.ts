@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import test from "node:test";
-import { artifactFor, engramPinVersion, uvPinVersion } from "../scripts/installer-downloads.mjs";
+import { PNPM_REGISTRY_ENV, artifactFor, download, engramPinVersion, uvPinVersion, verifiedDownload } from "../scripts/installer-downloads.mjs";
 
 // The Engram core the bundled install ships (S9), from its checksums.txt and
 // the published asset digests; every archive was downloaded and re-hashed.
@@ -58,4 +59,61 @@ test("fixed uv descriptors are the astral-sh/uv release archives and checksums, 
 	for (const [platform, arch] of [["linux", "ia32"], ["freebsd", "x64"], ["win32", "ia32"], ["darwin", "ppc64"]]) {
 		assert.throws(() => artifactFor("uv", platform, arch), /Unsupported/);
 	}
+});
+
+// An authorized npm mirror (GENTLE_SHELL_PNPM_REGISTRY) changes only where the
+// pinned pnpm bytes come from; the hostname below is a placeholder.
+const MIRROR = "https://registry.example.invalid/repository/all";
+const MIRRORED_TARBALL = "https://registry.example.invalid/repository/all/pnpm/-/pnpm-11.1.1.tgz";
+
+test("a configured pnpm mirror keeps the canonical pin and only adds its source", () => {
+	const canonical = artifactFor("pnpm");
+	assert.equal(canonical.url, "https://registry.npmjs.org/pnpm/-/pnpm-11.1.1.tgz");
+	assert.equal("sourceUrl" in canonical, false);
+	for (const base of [MIRROR, `${MIRROR}/`]) {
+		const mirrored = artifactFor("pnpm", undefined, undefined, { env: { [PNPM_REGISTRY_ENV]: base } });
+		assert.equal(mirrored.sourceUrl, MIRRORED_TARBALL, base);
+		assert.deepEqual({ ...mirrored, sourceUrl: undefined }, { ...canonical, sourceUrl: undefined }, "version, engine, size bound, integrity and identity stay pinned");
+		assert.ok(Object.isFrozen(mirrored));
+	}
+	assert.equal("sourceUrl" in artifactFor("pnpm", undefined, undefined, { env: { [PNPM_REGISTRY_ENV]: "  " } }), false);
+	// Other artifacts never follow the npm mirror.
+	assert.equal("sourceUrl" in artifactFor("engram", "linux", "x64", { env: { [PNPM_REGISTRY_ENV]: MIRROR } }), false);
+});
+
+test("a pnpm mirror with plain http, credentials, a query or a fragment is refused, never contacted", () => {
+	for (const value of ["http://registry.example.invalid/", "https://user:token@registry.example.invalid/", "https://registry.example.invalid/?token=x",
+		"https://registry.example.invalid/#x", "not a url", "file:///etc/passwd"]) {
+		assert.throws(() => artifactFor("pnpm", undefined, undefined, { env: { [PNPM_REGISTRY_ENV]: value } }),
+			(error: Error) => error.message === `${PNPM_REGISTRY_ENV} rejected: it must be an https registry URL without credentials, query or fragment` && !error.message.includes("token"), value);
+	}
+});
+
+test("bytes from the mirror must still match the pinned SHA-512: altered bytes are rejected", async () => {
+	const requested: string[] = [];
+	const mirrored = () => artifactFor("pnpm", undefined, undefined, { env: { [PNPM_REGISTRY_ENV]: MIRROR } });
+	const adapters = {
+		artifact: mirrored,
+		download: async (descriptor: { sourceUrl?: string; url: string }) => { requested.push(descriptor.sourceUrl ?? descriptor.url); return Buffer.from("altered tarball"); },
+	};
+	await assert.rejects(verifiedDownload("pnpm", adapters), (error: Error & { diagnosis?: { kind: string } }) =>
+		error.message === "Download integrity mismatch" && error.diagnosis?.kind === "integrity");
+	assert.deepEqual(requested, [MIRRORED_TARBALL]);
+});
+
+test("the real download fetches the source address, not the canonical one", async () => {
+	const paths: string[] = [];
+	const bytes = Buffer.from("mirror bytes");
+	const server = createServer((request, response) => {
+		paths.push(String(request.url));
+		response.writeHead(200, { "content-length": String(bytes.length) });
+		response.end(bytes);
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+	try {
+		const { port } = server.address() as { port: number };
+		const result = await download({ url: "https://registry.npmjs.org/pnpm/-/pnpm-11.1.1.tgz", sourceUrl: `http://127.0.0.1:${port}/mirror/pnpm-11.1.1.tgz`, maxBytes: 1024 });
+		assert.deepEqual(result, bytes);
+		assert.deepEqual(paths, ["/mirror/pnpm-11.1.1.tgz"]);
+	} finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

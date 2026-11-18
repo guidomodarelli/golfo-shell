@@ -181,6 +181,42 @@ Each kept line is copied verbatim, so `${VAR}` references stay for pnpm and npm 
 
 `writeNpmrcAuth` writes the result to `pnpm/config/npmrc` with one rename, mode 0600. On Windows that file is inside the private folder.
 
+## Corporate registries and mirrors
+
+Behind a corporate registry, tool wrapper or TLS-inspecting proxy, three stages can fail for different reasons. Each one fails closed and says which reason applies; none of them weakens a pin.
+
+### A pnpm wrapper on PATH
+
+A POSIX `pnpm` that is a script with none of pnpm's own shim forms (no `# cmd-shim-target=` comment, no `"$basedir/<target>" "$@"` line) and no pnpm `package.json` around it, such as a wrapper that runs `exec "$HOME/.wrapper/runner" pnpm "$@"`, proves nothing about the pnpm it reaches, or whether there is one. `ensurePnpm` never runs or changes it. The bootstrap prints `Bootstrap: pnpm on PATH is a script that names no pnpm package …` on stderr and acquires the verified pnpm 11.1.1 into its private tools, as when pnpm is absent. A recognized pnpm shim whose target is missing or ambiguous, or a script larger than 64 KiB, still blocks with its own reason.
+
+### The pinned pnpm from an authorized mirror
+
+Node, Engram, uv and Go come from their publishers' hosts. The pinned pnpm tarball comes from `registry.npmjs.org` unless `GENTLE_SHELL_PNPM_REGISTRY` names an authorized npm registry that proxies npmjs, for example:
+
+```sh
+GENTLE_SHELL_PNPM_REGISTRY=https://registry.example.invalid/repository/npm-all/ sh ./installer/scripts/bootstrap.sh
+```
+
+- **Only the source changes.** The tarball is fetched from `<registry>/pnpm/-/pnpm-11.1.1.tgz`; the version, the `>=22.13` engine, the 32 MiB bound and the SHA-512 stay pinned. A mirror that serves other bytes fails as `Download integrity mismatch`, and nothing is extracted or run.
+- **Opt-in and explicit.** It is read from the environment of the bootstrap (POSIX and Windows) and of the web installer's runtime step, never from `~/.npmrc`. The descriptor keeps the canonical npmjs URL as its identity, so the runtime marker (`.gentle-shell-runtime`) does not change when the mirror does.
+- **https only, no secrets.** A value that is not `https:`, or that carries a user, password, query or fragment, is refused before any request (`GENTLE_SHELL_PNPM_REGISTRY rejected: …`). The mirror is fetched without credentials and without redirects, like every pinned download; a mirror that needs a login or redirects to another host is not supported.
+- **CA.** For a TLS-inspecting proxy, point `NODE_EXTRA_CA_CERTS` at the organization's CA certificate. Certificate checks are never disabled.
+
+### Classified failures
+
+`scripts/installer-diagnostics.mjs` turns a failure into one line that names the kind, the HTTP status and the artifact or package with its version, and never a URL, host, header or token:
+
+| Stage | Kinds | Example |
+| --- | --- | --- |
+| Verified download (`verifiedDownload`, the bootstraps, `install-runtime`) | connection, TLS, HTTP status, redirect, encoding, size, integrity | `pnpm 11.1.1: the download source answered HTTP 403 (access denied, or the version is not served by this registry)` |
+| Release install (`installVersion`, `install-version`) | connection, TLS, HTTP status (`ERR_PNPM_FETCH_<status>`, `ERR_PNPM_NO_MATCHING_VERSION` as 404), integrity | `the npm registry answered HTTP 403 (…) for @aws-sdk/xml-builder@3.972.43; the release's pinned versions are never replaced with other versions` |
+
+`runBundledInstall` sends that line as the step's `detail`, and the wizard shows guidance for it: an unreachable source, a refused download or package version, an authentication failure (401/407), a TLS rejection or an integrity mismatch each get their own. Any other `install-version` failure, such as a postinstall error, keeps pnpm's last error line, with every URL replaced by `<url>`.
+
+### A release version the registry does not serve
+
+The release lockfile pins every package's version and integrity. When the registry does not serve one of them (HTTP 403 or 404 for that exact version), the install stops with that package named, and nothing is installed. The installer never resolves other versions, never edits the release lockfile and offers no "use what is available" mode: a lockfile resolved against a partial mirror would be a different, unverified product. Ask the registry's administrators to make the exact versions available, then run the installer again.
+
 ## Setup environment
 
 `setupEnvironment(layout, { platform, env, id })` is the environment the web installer runs `gentle-shell setup` in. The launcher itself then gives its children the user's environment ([Launcher in a bundled install](#launcher-in-a-bundled-install)). Its PATH, in order:

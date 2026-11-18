@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve, delimiter } from "node:path";
 import { spawnSync, spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { crc32, gunzipSync, inflateRawSync } from "node:zlib";
+import { FAILURE_KIND, classifyDownloadError, errorDiagnostic } from "./installer-diagnostics.mjs";
 
 // Acquisition pins, not compatibility minima. Sources verified before pinning:
 // https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt
@@ -20,6 +21,37 @@ const pnpm = Object.freeze({
 	integrity: "sha512-0f319zxhe2T6GlaoHDyN/g6WbjOmAQqiVrUXrne+Idk+Ba/8DeGoOw5PKdVp9otEaujwaM1yR8C7PfD7TXvfmg==",
 	maxBytes: 32 * 1024 * 1024,
 });
+/** The environment variable naming an authorized npm registry mirror for the
+ * pinned pnpm tarball, such as a corporate registry that proxies npmjs. Only the
+ * fetch source changes: version, engine, size bound and SHA-512 stay pinned, so
+ * the mirror must serve the very same bytes.
+ */
+export const PNPM_REGISTRY_ENV = "GENTLE_SHELL_PNPM_REGISTRY";
+/** The npm tarball path of the pinned pnpm under any registry base. */
+const PNPM_TARBALL_PATH = `pnpm/-/pnpm-${pnpm.version}.tgz`;
+const PNPM_MIRROR_REJECTED = `${PNPM_REGISTRY_ENV} rejected: it must be an https registry URL without credentials, query or fragment`;
+
+/** The https registry base `value` names, ending in `/`. A mirror is only a
+ * source: credentials, a query or a fragment in it are refused, never sent.
+ */
+export function pnpmMirrorBase(value) {
+	let url;
+	try { url = new URL(value); } catch { url = null; }
+	if (!url || url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+		throw new Error(PNPM_MIRROR_REJECTED);
+	}
+	return url.pathname.endsWith("/") ? url.href : `${url.href}/`;
+}
+
+/** The pinned pnpm descriptor, fetched from the mirror PNPM_REGISTRY_ENV names
+ * when set. `url` keeps the canonical npmjs address (the identity published
+ * runtimes are marked with); `sourceUrl` is where the bytes come from.
+ */
+function pnpmArtifact(env) {
+	const configured = env?.[PNPM_REGISTRY_ENV];
+	if (typeof configured !== "string" || configured.trim() === "") return pnpm;
+	return Object.freeze({ ...pnpm, sourceUrl: new URL(PNPM_TARBALL_PATH, pnpmMirrorBase(configured.trim())).href });
+}
 // Go toolchain used only to build Gentle AI: https://go.dev/dl/?mode=json&include=all
 // lists each archive's sha256 and size; every archive was downloaded and re-hashed
 // before pinning. go.dev/dl/<file> redirects to dl.google.com/go/<file>, and
@@ -75,9 +107,13 @@ const uv = Object.freeze({
 /** The uv version the music offer publishes under runtime/. */
 export const uvPinVersion = uv.version;
 
-/** Fixed allowlist; callers cannot supply download URLs, checksums or commands. */
-export function artifactFor(name, platform, arch) {
-	if (name === "pnpm") return pnpm;
+/** Fixed allowlist; callers cannot supply download URLs, checksums or commands.
+ * `env` only selects the authorized pnpm mirror (PNPM_REGISTRY_ENV); callers
+ * that only read a pin's version pass none, so a misconfigured mirror fails the
+ * download step that uses it and nothing else.
+ */
+export function artifactFor(name, platform, arch, { env = {} } = {}) {
+	if (name === "pnpm") return pnpmArtifact(env);
 	if (name === "node" && platform === "win32" && ["x64", "arm64"].includes(arch)) {
 		const pin = JSON.parse(readFileSync(new URL("./installer-windows-artifacts.json", import.meta.url), "utf8")).node;
 		const target = pin[arch];
@@ -115,16 +151,16 @@ export function artifactFor(name, platform, arch) {
 		integrity: `sha256-${hash}`, maxBytes: 100 * 1024 * 1024 });
 }
 
-/** The bytes at descriptor.url, at most descriptor.maxBytes. Redirects are
- * refused, except up to 5 to an https host in descriptor.redirectHosts (GitHub
- * serves release assets from another host). A non-2xx answer throws with its
- * HTTP `status`.
+/** The bytes at descriptor.sourceUrl (an authorized mirror) or descriptor.url,
+ * at most descriptor.maxBytes. Redirects are refused, except up to 5 to an https
+ * host in descriptor.redirectHosts (GitHub serves release assets from another
+ * host). A non-2xx answer throws with its HTTP `status`.
  */
 export async function download(descriptor) {
 	// identity: fetch would otherwise accept gzip and decode it, so the advertised
 	// length (dl.google.com gzips archives on request) would not match the bytes.
 	const hosts = Array.isArray(descriptor.redirectHosts) ? descriptor.redirectHosts : null;
-	let url = descriptor.url;
+	let url = descriptor.sourceUrl ?? descriptor.url;
 	let response;
 	for (let hops = 0; ; hops += 1) {
 		response = await fetch(url, { redirect: hosts ? "manual" : "error", headers: { "accept-encoding": "identity" }, signal: AbortSignal.timeout(60000) });
@@ -171,19 +207,23 @@ export async function download(descriptor) {
  * artifact descriptor) are trusted local code only. A descriptor with a size
  * accepts exactly that many bytes.
  * No extraction or execution is allowed before this function succeeds.
+ * Every failure carries a `diagnosis` { name, version, kind, status? } that
+ * installer-diagnostics turns into a line without the URL.
  */
 export async function verifiedDownload(name, adapters = {}, platform, arch) {
 	const descriptor = (adapters.artifact ?? artifactFor)(name, platform, arch);
+	const fail = (error, diagnosis) => Object.assign(error, { diagnosis: { name: descriptor.name ?? name, version: descriptor.version, ...diagnosis } });
 	let bytes;
 	try { bytes = await (adapters.download ?? download)(descriptor); }
-	catch (cause) { throw new Error("Download failed", { cause }); }
-	if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > descriptor.maxBytes) throw new Error("Download size rejected");
-	if (descriptor.size !== undefined && bytes.length !== descriptor.size) throw new Error("Download size rejected");
+	catch (cause) { throw fail(new Error("Download failed", { cause }), classifyDownloadError(cause)); }
+	const size = { kind: FAILURE_KIND.size };
+	if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > descriptor.maxBytes) throw fail(new Error("Download size rejected"), size);
+	if (descriptor.size !== undefined && bytes.length !== descriptor.size) throw fail(new Error("Download size rejected"), size);
 	const [algorithm, encoded] = descriptor.integrity.split("-");
 	const expected = Buffer.from(encoded, algorithm === "sha256" ? "hex" : "base64");
 	const actual = (adapters.digest ?? ((data, hash) => createHash(hash).update(data).digest()))(bytes, algorithm);
 	if (!Buffer.isBuffer(actual) || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-		throw new Error("Download integrity mismatch");
+		throw fail(new Error("Download integrity mismatch"), { kind: FAILURE_KIND.integrity });
 	}
 	return bytes;
 }
@@ -300,7 +340,22 @@ function packageFor(target) {
 		if (parent === directory) break;
 		directory = parent;
 	}
-	throw new Error("Existing pnpm compatibility is unknown: package engine evidence missing");
+	return null;
+}
+const MISSING_ENGINE_EVIDENCE = "Existing pnpm compatibility is unknown: package engine evidence missing";
+/** Printed by the bootstrap when ensurePnpm sets an unverifiable wrapper aside. */
+const WRAPPER_NOTICE = "pnpm on PATH is a script that names no pnpm package (such as a wrapper that delegates to another tool), " +
+	"so its pnpm cannot be verified; it was not run or changed, and this installation uses its own verified pnpm";
+/** A script (`#!`) that has none of pnpm's own shim forms, so shimTarget could
+ * not have resolved it: a wrapper, not a pnpm shim with a broken target. Read
+ * only within the shim limit; a larger script is not judged a wrapper.
+ */
+function wrapperScript(path) {
+	if (!regular(path)) return false;
+	const bytes = head(path, SHIM_LIMIT + 1);
+	if (bytes.subarray(0, 2).toString("latin1") !== "#!" || bytes.length > SHIM_LIMIT) return false;
+	const text = bytes.toString("utf8");
+	return !/^# cmd-shim-target=/m.test(text) && !/"\$basedir\//.test(text);
 }
 // mise, asdf and pnpm's own installer (directly or behind its shim, as
 // @pnpm/exe) ship pnpm as a standalone native executable that embeds its own
@@ -376,29 +431,43 @@ export function pinnedPnpmCompatible(version) {
 /** Reuse only proven engines/capabilities; missing pnpm gets verified registry bytes.
  * An existing pnpm with stable version evidence of another major, older than the
  * pin, or whose simple engine bound rejects this Node is left as it is, and the
- * verified pnpm is acquired exactly as when pnpm is missing. Unknown evidence
- * still refuses. Local test adapters cover transport/hash/process. There is no
+ * verified pnpm is acquired exactly as when pnpm is missing. So is a wrapper
+ * script that names no pnpm package: it is never run, and `notice` says so.
+ * Other unknown evidence still refuses. The download honors the authorized
+ * mirror env names (PNPM_REGISTRY_ENV), and a failed acquisition names its
+ * URL-free diagnostic. Local test adapters cover transport/hash/process. There is no
  * remote command API. `tools` is a private directory owned by the invoking
  * bootstrap/controller, or a function claiming one only when acquisition starts.
  */
 export async function ensurePnpm({ tools, env, nodeVersion, adapters = {} }) {
 	const processAdapter = adapters.process ?? processCheck;
 	const existing = findExecutable("pnpm", env);
+	let notice = null;
 	if (existing) {
-		const target = realpathSync(shimTarget(existing) ?? existing);
+		const resolved = shimTarget(existing);
+		const target = realpathSync(resolved ?? existing);
 		const standalone = standalonePnpm(target);
 		const metadata = standalone ? null : packageFor(target);
-		const bound = /^>=(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.test(metadata?.engines?.node ?? "");
-		// A standalone pnpm reports its version only by running; that answer is reused.
-		const version = metadata ? null : processAdapter(existing, ["--version"], env);
-		const shipped = standalone ? standaloneVersion(target) : null;
-		if (shipped !== null && version !== shipped) throw new Error("pnpm version rejected");
-		const incompatible = metadata
-			? parts(metadata.version) !== null && bound && (!pinnedPnpmCompatible(metadata.version) || !compatibleEngine(metadata.engines.node, nodeVersion))
-			: parts(version) !== null && !pinnedPnpmCompatible(version);
-		if (!incompatible) {
-			provePnpm(existing, [], metadata, nodeVersion, env, processAdapter, version);
-			return { env, acquired: false };
+		// A script pnpm's own shim forms do not resolve and no pnpm package
+		// surrounds, such as a corporate wrapper that delegates to a tool runner,
+		// proves nothing about the pnpm it reaches, if any: it is never run or
+		// changed, and the verified pnpm is acquired for this installation instead.
+		const wrapper = !standalone && !metadata && resolved === null && wrapperScript(target);
+		if (wrapper) notice = WRAPPER_NOTICE;
+		else {
+			if (!standalone && !metadata) throw new Error(MISSING_ENGINE_EVIDENCE);
+			const bound = /^>=(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.test(metadata?.engines?.node ?? "");
+			// A standalone pnpm reports its version only by running; that answer is reused.
+			const version = metadata ? null : processAdapter(existing, ["--version"], env);
+			const shipped = standalone ? standaloneVersion(target) : null;
+			if (shipped !== null && version !== shipped) throw new Error("pnpm version rejected");
+			const incompatible = metadata
+				? parts(metadata.version) !== null && bound && (!pinnedPnpmCompatible(metadata.version) || !compatibleEngine(metadata.engines.node, nodeVersion))
+				: parts(version) !== null && !pinnedPnpmCompatible(version);
+			if (!incompatible) {
+				provePnpm(existing, [], metadata, nodeVersion, env, processAdapter, version);
+				return { env, acquired: false, notice };
+			}
 		}
 	}
 	if (typeof tools === "function") tools = tools();
@@ -414,7 +483,8 @@ export async function ensurePnpm({ tools, env, nodeVersion, adapters = {} }) {
 	let published = false;
 	try {
 		const archive = join(stage, "pnpm.tgz");
-		writeFileSync(archive, await verifiedDownload("pnpm", adapters), { flag: "wx", mode: 0o600 });
+		const artifact = adapters.artifact ?? ((name, platform, arch) => artifactFor(name, platform, arch, { env }));
+		writeFileSync(archive, await verifiedDownload("pnpm", { ...adapters, artifact }), { flag: "wx", mode: 0o600 });
 		const names = processAdapter(tar, ["-tzf", archive], env).split("\n");
 		if (!names.length || names.some((name) => !name.startsWith("package/") || name.split("/").includes("..") || name.includes("\\"))) {
 			throw new Error("Unsafe pnpm archive paths");
@@ -435,10 +505,12 @@ export async function ensurePnpm({ tools, env, nodeVersion, adapters = {} }) {
 		mkdirSync(join(destination, "bin"), { mode: 0o700 });
 		const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 		writeFileSync(join(destination, "bin/pnpm"), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(join(destination, "package/bin/pnpm.mjs"))} "$@"\n`, { flag: "wx", mode: 0o700 });
-		return { acquired: true, env: { ...env, PATH: `${join(destination, "bin")}${delimiter}${env.PATH}` } };
-	} catch {
+		return { acquired: true, notice, env: { ...env, PATH: `${join(destination, "bin")}${delimiter}${env.PATH}` } };
+	} catch (cause) {
 		if (published) rmSync(destination, { recursive: true, force: true });
-		throw new Error("pnpm verified acquisition failed; no installation completed");
+		// Only the classified, URL-free download diagnostic is named; the cause stays attached.
+		const diagnostic = errorDiagnostic(cause) ?? (cause?.message === PNPM_MIRROR_REJECTED ? cause.message : null);
+		throw new Error(`pnpm verified acquisition failed${diagnostic ? ` (${diagnostic})` : ""}; no installation completed`, { cause });
 	} finally {
 		rmSync(stage, { recursive: true, force: true });
 	}
@@ -661,6 +733,7 @@ export async function bootstrap(bundle, suppliedTools, { env = process.env, adap
 	};
 	try {
 		const result = await ensurePnpm({ tools: claim, env, nodeVersion: process.versions.node, adapters });
+		if (result.notice) console.error(`Bootstrap: ${result.notice}.`);
 		await launchWizard({ bundle, env: result.env });
 	} catch (error) {
 		if (created) rmSync(tools, { recursive: true, force: true });

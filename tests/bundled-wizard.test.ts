@@ -5,7 +5,7 @@ import test from "node:test";
 import { distributionAsset, prefixLayout, setupEnvironment } from "../scripts/bundled-install.mjs";
 import { DISTRIBUTION_RELEASES, bundledBlockedReasons, bundledFailedSteps, bundledGate, bundledPlan, fetchDistribution, migrateGlobalShell, migrationGate,
 	runBundledInstall, shadowingCommand, windowsPathRegistry } from "../scripts/bundled-wizard.mjs";
-import { download } from "../scripts/installer-downloads.mjs";
+import { download, verifiedDownload } from "../scripts/installer-downloads.mjs";
 
 const manifest = { shell: "4.1.0", pi: "1.0.2" };
 const lockfile = "lockfileVersion: '9.0'\n";
@@ -218,7 +218,7 @@ test("runBundledInstall keeps the receipt of the PATH entry it applied, writes n
 test("runBundledInstall stops at the first failed step, keeps what finished and reports pnpm's or setup's last error line", async () => {
 	const h = harness({ failAt: "install 4.1.0-1.0.2 true go=false" });
 	assert.deepEqual(await h.run(), { outcome: "failed", failedStep: "install-version", completed: ["claim-prefix", "copy-npm-settings", "install-runtime"],
-		detail: "ERR_PNPM_FETCH_401 GET https://npm.acme.dev/x: Unauthorized - 401" });
+		detail: "ERR_PNPM_FETCH_401 GET <url>: Unauthorized - 401" });
 	assert.equal(h.log.at(-1)?.status, "failed");
 	assert.equal(h.calls.includes("launcher"), false);
 	const setup = await harness({ setup: { status: 1, stdout: "", stderr: "working\nError: GitHub API rate limit exceeded\n" } }).run();
@@ -235,6 +235,27 @@ test("runBundledInstall stops at the first failed step, keeps what finished and 
 	for (const step of [...new Set(["claim-prefix", "copy-npm-settings", "install-runtime", "install-version", "activate-version", "write-launcher", "bundled-path", "shell-setup"])]) {
 		assert.ok(bundledFailedSteps.includes(step), step);
 	}
+});
+
+test("runBundledInstall names a classified runtime download failure and a release install failure without registry URLs", async () => {
+	// install-runtime: the error the real verified download raises for a refused pinned pnpm.
+	const refused = await verifiedDownload("pnpm", { download: async () => { throw Object.assign(new Error("Download responded 403"), { status: 403 }); } })
+		.then(() => assert.fail("the download was expected to fail"), (error: Error) => error);
+	const runtime = harness();
+	runtime.adapters.operations.ensureRuntime = async () => { throw new Error("pnpm runtime failed", { cause: refused }); };
+	assert.deepEqual(await runtime.run(), { outcome: "failed", failedStep: "install-runtime", completed: ["claim-prefix", "copy-npm-settings"],
+		detail: "pnpm 11.1.1: the download source answered HTTP 403 (access denied, or the version is not served by this registry)" });
+	// install-version: installVersion's classified diagnostic wins over pnpm's raw line.
+	const diagnostic = "the npm registry answered HTTP 403 (access denied, or the version is not served by this registry) for @aws-sdk/xml-builder@3.972.43; " +
+		"the release's pinned versions are never replaced with other versions";
+	const version = harness();
+	version.adapters.operations.installVersion = async () => {
+		throw Object.assign(new Error("pnpm install failed (exit 1)"), { diagnostic, stderr: "ERR_PNPM_FETCH_403 GET https://user:token@registry.example.invalid/x.tgz: Forbidden - 403" });
+	};
+	const failed = await version.run();
+	assert.equal(failed.failedStep, "install-version");
+	assert.equal(failed.detail, diagnostic);
+	assert.doesNotMatch(JSON.stringify(failed), /token|registry\.example\.invalid/);
 });
 
 test("runBundledInstall blocks before any change without consent, on a modified plan, or when the assets are not the consented ones", async () => {

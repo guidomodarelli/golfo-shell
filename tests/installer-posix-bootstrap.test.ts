@@ -29,6 +29,7 @@ function fixture() {
 	for (const dir of [bin, home, join(bundle, "scripts"), join(bundle, "bin")]) mkdirSync(dir, { recursive: true, mode: 0o700 });
 	writeFileSync(join(bundle, "scripts/bootstrap.sh"), readFileSync(script));
 	writeFileSync(join(bundle, "scripts/installer-downloads.mjs"), readFileSync(helper));
+	writeFileSync(join(bundle, "scripts/installer-diagnostics.mjs"), readFileSync(resolve("scripts/installer-diagnostics.mjs")));
 	writeFileSync(join(bundle, "package.json"), JSON.stringify({ engines: { node: "^22.19.0 || >=23.6.0" }, packageManager: "pnpm@11.1.1" }));
 	for (const name of ["dirname", "pwd", "awk", "mkdir", "mktemp", "chmod", "mv", "rm", "sleep", "wc", "cat", "id", "ls"])
 		symlinkSync(systemUtility(name), join(bin, name));
@@ -449,15 +450,17 @@ posixTest("pnpm version evidence ignores the packageManager pin of the bundle it
 		assert.match(result.stdout, /wizard-child:/);
 	} finally { f.cleanup(); }
 });
-posixTest("a pnpm shim without a cmd-shim target still blocks", () => {
+posixTest("a pnpm script without a cmd-shim target is set aside unrun and the verified pnpm is acquired", async () => {
 	const f = fixture();
 	try {
-		f.addNode(); f.addPnpm("11.1.1", ">=22.13.0", "shim-without-target"); f.wizard();
-		const result = f.run();
-		assert.notEqual(result.status, 0);
-		assert.match(result.stderr, /pnpm compatibility is unknown: package engine evidence missing/);
-		assert.doesNotMatch(result.stdout, /wizard-child/);
-		assert.deepEqual(readdirSync(f.home), []);
+		f.addPnpm("11.1.1", ">=22.13.0", "shim-without-target");
+		const script = readFileSync(join(f.bin, "pnpm"), "utf8");
+		const adapters = acquisitionAdapters();
+		const result = await ensurePnpm({ tools: f.home, env: { PATH: f.bin }, nodeVersion: "24.21.0", adapters });
+		assert.equal(result.acquired, true);
+		assert.match(String(result.notice), /pnpm on PATH is a script that names no pnpm package.*it was not run or changed/);
+		assert.ok(adapters.calls.every((call) => !call.startsWith(join(f.bin, "pnpm"))), "the script is never run");
+		assert.equal(readFileSync(join(f.bin, "pnpm"), "utf8"), script, "the script is never changed");
 	} finally { f.cleanup(); }
 });
 // mise, asdf and pnpm's own installer ship pnpm as a standalone native executable
@@ -546,12 +549,51 @@ posixTest("a standalone native pnpm without a semver version or global capabilit
 			/pnpm global-install capability evidence missing/);
 	} finally { f.cleanup(); }
 });
-posixTest("a script pnpm without a package is not treated as standalone", async () => {
+// A corporate wrapper (issue #1) delegates to a tool runner: it names no pnpm
+// package, so whatever it reaches, if anything, cannot be proven compatible.
+const corporateWrapper = '#!/bin/sh\nexec "$HOME/.corporate-wrapper/runner" pnpm "$@"\n';
+posixTest("a delegating wrapper without a pnpm package is never run or changed; the verified pnpm is acquired instead", async () => {
+	for (const [body, linked] of [[corporateWrapper, false], ["#!/bin/sh\necho 11.1.1\n", false], [corporateWrapper, true]] as const) {
+		const f = fixture();
+		try {
+			// A PATH entry may also be a link to the wrapper kept elsewhere.
+			const wrapper = linked ? join(f.root, "corporate-wrapper/pnpm") : join(f.bin, "pnpm");
+			mkdirSync(dirname(wrapper), { recursive: true });
+			writeFileSync(wrapper, body, { mode: 0o755 });
+			if (linked) symlinkSync(wrapper, join(f.bin, "pnpm"));
+			const adapters = acquisitionAdapters();
+			const result = await ensurePnpm({ tools: f.home, env: { PATH: f.bin }, nodeVersion: "24.21.0", adapters });
+			assert.equal(result.acquired, true);
+			assert.ok(result.env.PATH.startsWith(`${join(f.home, "pnpm/bin")}:`));
+			assert.match(String(result.notice), /so its pnpm cannot be verified; it was not run or changed, and this installation uses its own verified pnpm/);
+			assert.ok(adapters.calls.every((call) => !call.startsWith(join(f.bin, "pnpm")) && !call.startsWith(wrapper)), "the wrapper is never run");
+			assert.equal(readFileSync(wrapper, "utf8"), body);
+		} finally { f.cleanup(); }
+	}
+});
+posixTest("a refused pnpm download names the artifact and HTTP status, never the source URL", async () => {
 	const f = fixture();
 	try {
-		writeFileSync(join(f.bin, "pnpm"), "#!/bin/sh\necho 10.27.0\n", { mode: 0o755 });
-		await assert.rejects(ensurePnpm({ tools: f.home, env: { PATH: f.bin }, nodeVersion: "24.21.0", adapters: { process: () => { throw new Error("must not run"); } } }),
-			/package engine evidence missing/);
+		writeFileSync(join(f.bin, "pnpm"), corporateWrapper, { mode: 0o755 });
+		const requested: string[] = [];
+		const adapters = { ...acquisitionAdapters(), download: async (descriptor: { sourceUrl?: string; url: string }) => {
+			requested.push(descriptor.sourceUrl ?? descriptor.url);
+			throw Object.assign(new Error("Download responded 403"), { status: 403 });
+		} };
+		const env = { PATH: f.bin, GENTLE_SHELL_PNPM_REGISTRY: "https://registry.example.invalid/repository/all/" };
+		await assert.rejects(ensurePnpm({ tools: f.home, env, nodeVersion: "24.21.0", adapters }), (error: Error) =>
+			/^pnpm verified acquisition failed \(pnpm 11\.1\.1: the download source answered HTTP 403 \(access denied/.test(error.message) &&
+			/no installation completed$/.test(error.message) && !error.message.includes("registry.example.invalid"));
+		assert.deepEqual(requested, ["https://registry.example.invalid/repository/all/pnpm/-/pnpm-11.1.1.tgz"], "the configured mirror is the only source asked");
+		assert.equal(existsSync(join(f.home, "pnpm")), false, "nothing is published");
+	} finally { f.cleanup(); }
+});
+posixTest("a misconfigured pnpm mirror fails the acquisition with its own reason", async () => {
+	const f = fixture();
+	try {
+		const env = { PATH: f.bin, GENTLE_SHELL_PNPM_REGISTRY: "http://registry.example.invalid/" };
+		await assert.rejects(ensurePnpm({ tools: f.home, env, nodeVersion: "24.21.0", adapters: { ...acquisitionAdapters(), download: () => { throw new Error("must not download"); } } }),
+			/pnpm verified acquisition failed \(GENTLE_SHELL_PNPM_REGISTRY rejected: it must be an https registry URL/);
 	} finally { f.cleanup(); }
 });
 // $PNPM_HOME layouts captured from real macOS installs (get.pnpm.io + `pnpm setup`,
