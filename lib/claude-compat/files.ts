@@ -40,6 +40,8 @@ export interface Frontmatter {
 	body: string;
 	/** Whether the text starts with a frontmatter block. */
 	present: boolean;
+	/** Non-empty, non-comment frontmatter lines that could not be assigned to any key. */
+	unparsed: string[];
 }
 
 const YAML_COMMENT_MARKER = "#";
@@ -74,8 +76,9 @@ export function stripYamlComment(value: string): string {
 /** Simple scalar frontmatter reader: keeps the body untouched, drops YAML comments and folds `>`/`|` blocks to one line. */
 export function readFrontmatter(text: string): Frontmatter {
 	const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
-	if (!match) return { fields: {}, body: text, present: false };
+	if (!match) return { fields: {}, body: text, present: false, unparsed: [] };
 	const fields: Record<string, string> = {};
+	const unparsed: string[] = [];
 	let currentKey: string | undefined;
 	let inBlockScalar = false;
 	for (const line of match[1].split(/\r?\n/)) {
@@ -85,17 +88,23 @@ export function readFrontmatter(text: string): Frontmatter {
 			const value = stripYamlComment(pair[2]).trim();
 			inBlockScalar = BLOCK_SCALAR_PATTERN.test(value);
 			fields[currentKey] = value.replace(/^(['"])([\s\S]*)\1$/, "$2");
+		} else if (currentKey && !inBlockScalar && /^-(?:\s|$)/.test(line)) {
+			// YAML allows block sequence items at the same indentation as their key.
+			const item = stripYamlComment(line.trim());
+			if (item) fields[currentKey] += `\n${item}`;
 		} else if (currentKey && /^\s+\S/.test(line)) {
 			// Inside `>`/`|` blocks a `#` is content; elsewhere comment lines are skipped.
 			const continuation = inBlockScalar ? line.trim() : stripYamlComment(line.trim());
 			if (continuation) fields[currentKey] += `\n${continuation}`;
+		} else if (stripYamlComment(line.trim())) {
+			unparsed.push(line.trim());
 		}
 	}
 	for (const [key, value] of Object.entries(fields)) {
 		if (/^[>|][+-]?(?:\n|$)/.test(value)) fields[key] = value.replace(/^[>|][+-]?/, "").trim().replace(/\s+/g, " ");
 		else if (value.startsWith("- ") || value.includes("\n- ")) fields[key] = value.split("\n").map((item) => item.replace(/^-\s*/, "").trim()).filter(Boolean).join(", ");
 	}
-	return { fields, body: match[2], present: true };
+	return { fields, body: match[2], present: true, unparsed };
 }
 
 /**

@@ -321,6 +321,27 @@ test("permission fields with YAML comments are enforced and uninterpretable entr
 	} finally { fixture.dispose(); }
 });
 
+test("unindented YAML sequences are enforced and unassignable frontmatter lines reject the agent", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"agents/denier.md": agentFile({ name: "denier", description: "Denies writes", tools: "Read, Write", disallowedTools: "\n- Write # never modify files" }),
+			"agents/flat-list.md": agentFile({ name: "flat-list", description: "Flat list", tools: "\n- Read\n- Grep" }),
+			"agents/stray.md": agentFile({ name: "stray", description: "Stray line", tools: "Read\nWrite allowed anyway" }),
+		} });
+		fixture.finalize();
+		const state = sync(fixture);
+		const denier = state.policies.find((policy) => policy.name === "claude-sample-denier")!;
+		assert.deepEqual(denier.tools.sort(), ["claude_policy_sample_denier", "read", "subagent_parent_message"]);
+		assert.throws(() => enforceAgentPolicy(denier, "write", {}), PolicyViolation);
+		const flatList = state.policies.find((policy) => policy.name === "claude-sample-flat-list")!;
+		assert.deepEqual(flatList.tools.sort(), ["claude_policy_sample_flat_list", "grep", "read", "subagent_parent_message"]);
+		assert.equal(state.policies.some((policy) => policy.name === "claude-sample-stray"), false);
+		assert.ok(state.agentErrors.some((error) => /frontmatter: "Write allowed anyway": declaración de permisos no interpretable con seguridad; requiere adaptación manual/.test(error.reason)));
+		assert.equal(existsSync(join(fixture.agentHome, "agents", "claude-sample-stray.md")), false);
+	} finally { fixture.dispose(); }
+});
+
 test("Bash(pattern) accepts one simple argv and blocks shell syntax it cannot represent", () => {
 	const patterns = ["git status", "git diff *", "npm run test:*"].map((source) => parseCommandPattern(source)!);
 	for (const command of ["git status", "git diff", "git diff --stat src/a.ts", "npm run test", "npm run test --watch=false"]) {

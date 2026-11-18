@@ -60,6 +60,11 @@ export function splitToolList(value: string): string[] {
 	return tools.map((tool) => tool.trim().replace(/^(['"])(.*)\1$/, "$2")).filter(Boolean);
 }
 
+/** Rejection for permission declarations the importer cannot interpret safely. */
+function uninterpretablePermissions(field: string, entries: readonly string[]): Error {
+	return new Error(`${field}: ${entries.map((entry) => JSON.stringify(entry.slice(0, 80))).join(", ")}: declaración de permisos no interpretable con seguridad; requiere adaptación manual`);
+}
+
 /**
  * Splits a permission field (`tools`, `disallowedTools`) and rejects the agent
  * when any entry is not a recognizable tool name, so a malformed declaration
@@ -68,7 +73,7 @@ export function splitToolList(value: string): string[] {
 export function parsePermissionList(field: string, value: string): string[] {
 	const entries = splitToolList(value);
 	const invalid = entries.filter((entry) => !TOOL_DECLARATION_PATTERN.test(entry) && !MCP_TOOL_DECLARATION_PATTERN.test(entry));
-	if (invalid.length > 0) throw new Error(`${field}: ${invalid.map((entry) => JSON.stringify(entry.slice(0, 80))).join(", ")}: declaración de permisos no interpretable con seguridad; requiere adaptación manual`);
+	if (invalid.length > 0) throw uninterpretablePermissions(field, invalid);
 	return entries;
 }
 
@@ -174,7 +179,9 @@ function compatibilityNotice(owner: string, sourceName: string, root: string, po
 
 /** Converts one Claude Code agent into a Pi agent file plus its enforced policy. */
 export function convertAgent(source: AgentSource, agentHome: string, previous: ManagedFiles, written: ManagedFiles, reservedNames: ReadonlySet<string> = new Set(), reservedMarkers: ReadonlySet<string> = new Set()): { agent: ConvertedAgent; policy: AgentPolicy } {
-	const { fields, body } = readFrontmatter(readFileSync(source.file, "utf8"));
+	const { fields, body, unparsed } = readFrontmatter(readFileSync(source.file, "utf8"));
+	// A line the reader could not assign might carry a permission; never publish a broader policy.
+	if (unparsed.length > 0) throw uninterpretablePermissions("frontmatter", unparsed);
 	const sourceName = fields.name?.trim() || basename(source.file, ".md");
 	const identifier = identifierOf(`${source.owner.split("@")[0]}-${sourceName}`);
 	const name = `${MANAGED_AGENT_PREFIX}${identifier}`;
