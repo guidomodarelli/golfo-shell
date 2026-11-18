@@ -7,7 +7,7 @@ import { CHILD_SKILLS_CATALOG_ENV, REQUESTED_TOOLS_ENV } from "../lib/agents-run
 import { enforceAgentPolicy, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { HOOK_CONTEXT_MESSAGE_TYPE, HOOK_EVENT, STATUS_COMMAND, SYNC_COMMAND } from "../lib/claude-compat/constants.ts";
 import { markClaudeCompatGuardActive } from "../lib/claude-compat/guard-signal.ts";
-import { callReviewedHook, hookAppliesToTool, hookPayload, type ResolvedHook, translateToolInput } from "../lib/claude-compat/hooks.ts";
+import { callReviewedHook, hookAppliesToTool, hookPayload, type ResolvedHook, translateToolInput, unavailableGuardReason } from "../lib/claude-compat/hooks.ts";
 import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { type ClaudeCompatState, readClaudeCompatState, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
 
@@ -62,6 +62,9 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			}
 			const preToolHooks = hooksFor(state, HOOK_EVENT.PRE_TOOL_USE).filter((candidate) => hookAppliesToTool(candidate, event.toolName));
 			if (preToolHooks.length === 0) return undefined;
+			// A reviewed guard whose script vanished must not let matching calls through.
+			const unavailableGuard = preToolHooks.find((hook) => hook.unavailable !== undefined);
+			if (unavailableGuard) return block(unavailableGuardReason(unavailableGuard));
 			const preToolCall = translateToolInput(event.toolName, input, ctx.cwd);
 			// A guard that cannot see the input in Claude Code's shape could approve it blindly.
 			if (!preToolCall) return block(`claude-compat: la entrada de ${event.toolName} no se puede representar para los hooks revisados (${preToolHooks.map((hook) => hook.id).join(", ")}); no se ejecutó la operación`);

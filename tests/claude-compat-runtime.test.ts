@@ -8,6 +8,7 @@ import { createAssistantMessageEventStream, type AssistantMessage } from "@earen
 import { createClaudeCompatExtension } from "../extensions/claude-compat.ts";
 import { REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
 import { CLAUDE_COMPAT_CONFIG_SCHEMA } from "../lib/claude-compat/constants.ts";
+import { formatClaudeCompatReport } from "../lib/claude-compat/report.ts";
 import { claudeCompatStatePath, synchronizeClaudeCompat } from "../lib/claude-compat/sync.ts";
 import { agentFile, createClaudeFixture, skillFile } from "./claude-compat-fixtures.ts";
 
@@ -172,6 +173,32 @@ test("a reviewed PreToolUse hook sees Claude Code's tool_input: a .env guard blo
 		const unrepresentable = await call("edit", { path: "x/app.ts", edits: [] });
 		assert.equal(unrepresentable?.block, true);
 		assert.match(unrepresentable!.reason, /no se puede representar/);
+	} finally { fixture.dispose(); }
+});
+
+test("a reviewed PreToolUse guard whose script was removed fails closed; a missing SessionStart hook is only reported", async () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "guard@market", version: "1.0.0", files: { "hooks/other.mjs": "" } });
+		fixture.finalize();
+		writeFileSync(join(fixture.configHome, "claude-compat.json"), JSON.stringify({ schema: CLAUDE_COMPAT_CONFIG_SCHEMA, hooks: [
+			{ id: "push-guard", plugin: "guard", script: "hooks/push.mjs", event: "PreToolUse", tools: ["Bash"] },
+			{ id: "context", plugin: "guard", script: "hooks/context.mjs", event: "SessionStart" },
+		] }));
+		const state = synchronizeClaudeCompat({ home: fixture.home, agentHome: fixture.agentHome, configHome: fixture.configHome, nativeSkillDirectories: [] });
+		assert.deepEqual(state.hooks.map((hook) => [hook.id, hook.script, hook.unavailable]), [["push-guard", undefined, "script hooks/push.mjs no existe en guard"]]);
+		assert.equal(state.hookErrors.length, 2);
+		assert.match(state.hookErrors[1], /context: script hooks\/context\.mjs no existe/);
+		assert.match(formatClaudeCompatReport(state), /Guards no disponibles[^\n]*:\n {2}- push-guard: Bash/);
+		const notices: string[] = [];
+		const context = { cwd: fixture.root, hasUI: true, signal: undefined, sessionManager: { getSessionId: () => "session" }, ui: { confirm: async () => true, notify: (text: string) => notices.push(text) } } as unknown as ExtensionContext;
+		const { handlers } = harness({}, fixture);
+		const blocked = await handlers.get("tool_call")!({ toolName: "bash", toolCallId: "1", input: { command: "git push" } }, context) as { block: boolean; reason: string };
+		assert.equal(blocked.block, true);
+		assert.match(blocked.reason, /guard push-guard no disponible \(script hooks\/push\.mjs no existe en guard\)/);
+		assert.equal(await handlers.get("tool_call")!({ toolName: "read", toolCallId: "2", input: { path: "x" } }, context), undefined, "the guard only covers Bash");
+		await handlers.get("session_start")!({ reason: "startup" }, context);
+		assert.deepEqual(notices, [], "a missing context hook is not in the state, so it never runs nor blocks");
 	} finally { fixture.dispose(); }
 });
 

@@ -24,13 +24,20 @@ export interface HookInventoryEntry {
 	reason: string;
 }
 
-/** A reviewed hook bound to an installed script. */
+/**
+ * A reviewed hook bound to an installed script. A reviewed `PreToolUse` guard
+ * whose script cannot be resolved is kept without `script` and with
+ * `unavailable` set, so the calls it matches fail closed instead of running
+ * unguarded.
+ */
 export interface ResolvedHook {
 	id: string;
 	event: SupportedHookEvent;
 	tools?: string[];
-	script: string;
-	root: string;
+	script?: string;
+	root?: string;
+	/** Why the reviewed guard could not be bound; such a guard blocks every call it matches. */
+	unavailable?: string;
 }
 
 interface HookCommand { type?: string; command?: string }
@@ -59,21 +66,34 @@ function commandReferencesScript(command: string, script: string): boolean {
 	return command.replaceAll("\\", "/").includes(normalized);
 }
 
-/** Binds each reviewed hook to the newest enabled install of its plugin. */
+/**
+ * Binds each reviewed hook to the newest enabled install of its plugin. An
+ * unresolvable `PreToolUse` guard stays in `hooks` as a blocking entry (fail
+ * closed); unresolvable context hooks are only reported in `errors`.
+ */
 export function resolveReviewedHooks(reviewed: readonly ReviewedHook[], plugins: readonly ClaudePlugin[]): { hooks: ResolvedHook[]; errors: string[] } {
 	const hooks: ResolvedHook[] = [];
 	const errors: string[] = [];
+	const unresolved = (hook: ReviewedHook, reason: string) => {
+		errors.push(`${hook.id}: ${reason}`);
+		if (hook.event === HOOK_EVENT.PRE_TOOL_USE) hooks.push({ id: hook.id, event: hook.event, ...(hook.tools ? { tools: hook.tools } : {}), unavailable: reason });
+	};
 	for (const hook of reviewed) {
 		const plugin = plugins.find((candidate) => candidate.name === hook.plugin);
-		if (!plugin) { errors.push(`${hook.id}: plugin ${hook.plugin} no habilitado o no importado`); continue; }
-		if (!existsSync(join(plugin.root, hook.script))) { errors.push(`${hook.id}: script ${hook.script} no existe en ${hook.plugin}`); continue; }
+		if (!plugin) { unresolved(hook, `plugin ${hook.plugin} no habilitado o no importado`); continue; }
+		if (!existsSync(join(plugin.root, hook.script))) { unresolved(hook, `script ${hook.script} no existe en ${hook.plugin}`); continue; }
 		try {
 			hooks.push({ id: hook.id, event: hook.event, ...(hook.tools ? { tools: hook.tools } : {}), script: pluginFile(plugin.root, hook.script), root: plugin.root });
 		} catch (error) {
-			errors.push(`${hook.id}: ${error instanceof Error ? error.message : String(error)}`);
+			unresolved(hook, error instanceof Error ? error.message : String(error));
 		}
 	}
 	return { hooks, errors };
+}
+
+/** Block reason for a reviewed guard that could not be bound to its script. */
+export function unavailableGuardReason(hook: ResolvedHook): string {
+	return `claude-compat: guard ${hook.id} no disponible (${hook.unavailable ?? "sin script resuelto"}); no se ejecutó la operación. Restaurar el plugin o quitar el hook de claude-compat.json y ejecutar la sincronización`;
 }
 
 /**
@@ -279,6 +299,10 @@ export function hookAppliesToTool(hook: ResolvedHook, piToolName: string): boole
 /** Runs a reviewed hook with the Claude Code environment variables it expects. */
 export async function callReviewedHook(hook: ResolvedHook, payload: Record<string, unknown>, options: { cwd: string; signal?: AbortSignal }): Promise<HookDecision> {
 	const gating = hook.event === HOOK_EVENT.PRE_TOOL_USE;
+	if (hook.unavailable !== undefined || !hook.script || !hook.root) {
+		if (gating) return { action: "block", reason: unavailableGuardReason(hook) };
+		throw new Error(`claude-compat:callReviewedHook failed: hook ${hook.id} no disponible (${hook.unavailable ?? "sin script resuelto"})`);
+	}
 	const environment = { ...process.env, CLAUDE_PLUGIN_ROOT: hook.root, CLAUDE_PROJECT_DIR: options.cwd };
 	try {
 		const result = await runHookScript(hook.script, payload, { cwd: options.cwd, environment, signal: options.signal });

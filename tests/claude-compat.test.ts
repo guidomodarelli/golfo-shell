@@ -288,6 +288,9 @@ test("hook processes are bounded: timeout, oversized output and cancellation fai
 		const denied = await callReviewedHook(hook, payload("rm"), { cwd: fixture.root });
 		assert.equal(denied.action, "block");
 		assert.match((denied as { reason: string }).reason, new RegExp(fixture.root.replaceAll("\\", "\\\\")), "CLAUDE_PLUGIN_ROOT is the plugin root");
+		const unavailable = await callReviewedHook({ id: "gone", event: "PreToolUse", unavailable: "script hooks/gone.mjs no existe en guard" }, payload("ok"), { cwd: fixture.root });
+		assert.equal(unavailable.action, "block", "an unresolved guard never approves");
+		await assert.rejects(callReviewedHook({ id: "gone-context", event: "SessionStart", unavailable: "plugin ausente" }, {}, { cwd: fixture.root }), /no disponible/);
 		const timedOut = await callReviewedHook({ ...hook, script: sleeper }, payload("ok"), { cwd: fixture.root, signal: AbortSignal.timeout(200) });
 		assert.equal(timedOut.action, "block");
 	} finally { fixture.dispose(); }

@@ -77,6 +77,8 @@ Contrato de cada evento traducido:
 
 Los scripts `.js/.mjs/.cjs` corren con el Node en uso y el resto con `bash` (en Windows, Git Bash; nunca el `bash.exe` de WSL en System32), sin shell intermedio, con `CLAUDE_PLUGIN_ROOT` y `CLAUDE_PROJECT_DIR`, límite de 10 s y 512 KiB de salida. En `PreToolUse`, código distinto de cero, JSON inválido, decisión desconocida, timeout o cancelación **bloquean**. En hooks de contexto, el error se avisa y no se inyecta nada.
 
+Si un `PreToolUse` revisado no se puede resolver al sincronizar (plugin ausente o deshabilitado, script borrado o renombrado, ruta fuera del plugin), queda como guard **no disponible**: se reporta y **bloquea** toda llamada que cubra su matcher hasta restaurar el script o quitarlo de `claude-compat.json`. Los hooks de contexto no resueltos solo se reportan.
+
 El informe separa:
 
 - **Hooks adaptados**: los revisados.
