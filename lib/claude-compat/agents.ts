@@ -91,6 +91,47 @@ export function translateTools(declared: readonly string[]): Pick<AgentPolicy, "
 	return { tools: [...tools], toolPrefixes: [...toolPrefixes], unrestrictedBash, commandPatterns: unrestrictedBash ? [] : commandPatterns, unsupported };
 }
 
+const TOOL_RULE_PATTERN = /^([^()]+)\((.*)\)$/s;
+
+function unrepresentableDenial(rule: string, reason: string): Error {
+	return new Error(`disallowedTools: ${rule} no se puede representar con seguridad (${reason}); requiere adaptación manual`);
+}
+
+/**
+ * Applies a Claude Code `disallowedTools` denylist to the declared allowlist,
+ * as Claude Code removes denied tools even when `tools` lists them. A denial
+ * that cannot be enforced exactly (a narrower rule inside a broader grant, or
+ * wildcards) rejects the agent instead of leaving the tool reachable.
+ */
+export function applyDisallowedTools(declared: readonly string[], denied: readonly string[]): { allowed: string[]; removed: string[] } {
+	let allowed = [...declared];
+	const removed: string[] = [];
+	const remove = (shouldRemove: (tool: string) => boolean) => {
+		removed.push(...allowed.filter(shouldRemove));
+		allowed = allowed.filter((tool) => !shouldRemove(tool));
+	};
+	for (const rule of denied) {
+		if (rule.startsWith(MCP_TOOL_PREFIX)) {
+			if (/[()*\s]/.test(rule)) throw unrepresentableDenial(rule, "patrón MCP con comodines");
+			const deniedName = piMcpToolName(rule);
+			const isMcp = (tool: string) => tool.startsWith(MCP_TOOL_PREFIX) && !/[()*\s]/.test(tool);
+			remove((tool) => isMcp(tool) && (piMcpToolName(tool) === deniedName || piMcpToolName(tool).startsWith(`${deniedName}${MCP_SEGMENT_SEPARATOR}`)));
+			if (allowed.some((tool) => isMcp(tool) && deniedName.startsWith(`${piMcpToolName(tool)}${MCP_SEGMENT_SEPARATOR}`))) throw unrepresentableDenial(rule, "el servidor MCP completo sigue permitido");
+			continue;
+		}
+		const scoped = TOOL_RULE_PATTERN.exec(rule);
+		if (scoped) {
+			const toolName = scoped[1].trim();
+			remove((tool) => tool === rule);
+			if (allowed.some((tool) => tool === toolName || TOOL_RULE_PATTERN.exec(tool)?.[1].trim() === toolName)) throw unrepresentableDenial(rule, `${toolName} sigue permitido con un alcance que puede incluirla`);
+			continue;
+		}
+		if (rule.includes("*")) throw unrepresentableDenial(rule, "comodines");
+		remove((tool) => tool === rule || TOOL_RULE_PATTERN.exec(tool)?.[1].trim() === rule);
+	}
+	return { allowed, removed };
+}
+
 function compatibilityNotice(owner: string, sourceName: string, root: string, policy: AgentPolicy, omitted: readonly string[]): string {
 	return [
 		"## Contrato de compatibilidad Pi (claude-compat)",
@@ -105,7 +146,7 @@ function compatibilityNotice(owner: string, sourceName: string, root: string, po
 }
 
 /** Converts one Claude Code agent into a Pi agent file plus its enforced policy. */
-export function convertAgent(source: AgentSource, agentHome: string, previous: ManagedFiles, written: ManagedFiles, reservedNames: ReadonlySet<string> = new Set()): { agent: ConvertedAgent; policy: AgentPolicy } {
+export function convertAgent(source: AgentSource, agentHome: string, previous: ManagedFiles, written: ManagedFiles, reservedNames: ReadonlySet<string> = new Set(), reservedMarkers: ReadonlySet<string> = new Set()): { agent: ConvertedAgent; policy: AgentPolicy } {
 	const { fields, body } = readFrontmatter(readFileSync(source.file, "utf8"));
 	const sourceName = fields.name?.trim() || basename(source.file, ".md");
 	const identifier = identifierOf(`${source.owner.split("@")[0]}-${sourceName}`);
@@ -113,10 +154,13 @@ export function convertAgent(source: AgentSource, agentHome: string, previous: M
 	if (reservedNames.has(name)) throw new Error(`nombre duplicado ${name}; se conserva la primera versión (plugin más nuevo)`);
 	if (!body.trim()) throw new Error("agente sin instrucciones después del frontmatter");
 	if (!fields.tools?.trim()) throw new Error("agente sin allowlist explícita de tools (en Claude Code hereda todas); requiere adaptación manual");
-	const translated = translateTools(splitToolList(fields.tools));
 	const marker = `${POLICY_TOOL_PREFIX}${identifier.replaceAll("-", "_").toLowerCase()}`;
+	if (reservedMarkers.has(marker)) throw new Error(`marker de política ${marker} ya usado por otro agente (nombres que solo difieren en '-', '_' o mayúsculas); se conserva la primera versión`);
+	const { allowed, removed } = applyDisallowedTools(splitToolList(fields.tools), splitToolList(fields.disallowedTools ?? ""));
+	const translated = translateTools(allowed);
 	const policy: AgentPolicy = { name, marker, ...translated, tools: [...translated.tools, marker, PARENT_NOTIFICATION_TOOL], source: source.file };
 	const omitted: string[] = [];
+	if (removed.length > 0) omitted.push(`tools quitadas por disallowedTools: ${removed.join(", ")}`);
 	const permissionMode = fields.permissionMode?.trim();
 	if (permissionMode) omitted.push(`permissionMode: ${permissionMode}${(FORBIDDEN_PERMISSION_MODES as readonly string[]).includes(permissionMode) ? " (omite permisos; nunca se importa)" : ""}`);
 	const model = fields.model?.trim() && fields.model.trim() !== INHERIT_MODEL ? fields.model.trim() : undefined;
@@ -163,10 +207,12 @@ export function buildAgentCatalog(options: { home: string; agentHome: string; pl
 	const policies: AgentPolicy[] = [];
 	const errors: AgentImportError[] = [];
 	const names = new Set<string>();
+	const markers = new Set<string>();
 	for (const source of agentSources(options.home, options.plugins)) {
 		try {
-			const converted = convertAgent(source, options.agentHome, options.previous, options.written, names);
+			const converted = convertAgent(source, options.agentHome, options.previous, options.written, names, markers);
 			names.add(converted.agent.name);
+			markers.add(converted.policy.marker);
 			agents.push(converted.agent);
 			policies.push(converted.policy);
 		} catch (error) {

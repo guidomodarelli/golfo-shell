@@ -66,7 +66,9 @@ export function resolveChildPolicy(environment: NodeJS.ProcessEnv, requestedTool
 	const markers = (environment[requestedToolsVariable] ?? "").split(",").map((name) => name.trim()).filter((name) => name.startsWith(POLICY_TOOL_PREFIX));
 	if (markers.length === 0) return null;
 	if (markers.length !== 1) throw new PolicyViolation("varias políticas de agente importado en un mismo child; ejecución rechazada");
-	const policy = policies?.find((candidate) => candidate.marker === markers[0]);
+	const matching = policies?.filter((candidate) => candidate.marker === markers[0]) ?? [];
+	if (matching.length > 1) throw new PolicyViolation(`marker de política ${markers[0]} compartido por varios agentes importados; ejecución rechazada, ejecutar /claude-compat:sync`);
+	const [policy] = matching;
 	if (!policy) throw new PolicyViolation(`política de agente importado desconocida (${markers[0]}); ejecutar /claude-compat:sync`);
 	return policy;
 }

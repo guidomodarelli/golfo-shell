@@ -140,6 +140,50 @@ test("agents keep exact allowlists, report missing tools and never import permis
 	} finally { fixture.dispose(); }
 });
 
+test("agents whose policy markers collide are rejected before writing, so no restricted agent inherits another policy", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"agents/first.md": agentFile({ name: "a-b", description: "Open", tools: "Read, Bash" }),
+			"agents/second.md": agentFile({ name: "a_b", description: "Restricted", tools: "Read" }),
+			"agents/third.md": agentFile({ name: "A-B", description: "Restricted", tools: "Read" }),
+		} });
+		fixture.finalize();
+		const state = sync(fixture);
+		assert.deepEqual(state.policies.map((policy) => policy.marker), ["claude_policy_sample_a_b"]);
+		assert.equal(state.agents.length, 1);
+		assert.equal(state.agentErrors.length, 2);
+		for (const error of state.agentErrors) assert.match(error.reason, /marker de política claude_policy_sample_a_b ya usado/);
+		assert.ok(state.agents.every((agent) => existsSync(agent.file)));
+		const shared = { ...state.policies[0], name: "claude-sample-a_b" };
+		assert.throws(() => resolveChildPolicy({ GENTLE_PI_AGENTS_CHILD: "1", [REQUESTED]: shared.marker }, REQUESTED, [state.policies[0], shared]), /compartido por varios agentes/);
+	} finally { fixture.dispose(); }
+});
+
+test("disallowedTools removes denied tools from the allowlist and rejects denials it cannot enforce", () => {
+	const fixture = createClaudeFixture();
+	try {
+		fixture.plugin({ key: "sample@market", version: "1.0.0", files: {
+			"agents/reader.md": agentFile({ name: "reader", description: "Reads", tools: "Read, Write, Bash(git status), mcp__docs__search, mcp__docs__write", disallowedTools: "[Write, Bash, mcp__docs__write]" }),
+			"agents/pusher.md": agentFile({ name: "pusher", description: "Pushes", tools: "Read, Bash", disallowedTools: "Bash(git push)" }),
+			"agents/wildcard.md": agentFile({ name: "wildcard", description: "Wildcard", tools: "Read, mcp__docs", disallowedTools: "mcp__docs__*" }),
+		} });
+		fixture.finalize();
+		const state = sync(fixture);
+		const reader = state.policies.find((policy) => policy.name === "claude-sample-reader")!;
+		assert.deepEqual(reader.tools.sort(), ["claude_policy_sample_reader", "mcp__docs__search", "read", "subagent_parent_message"]);
+		assert.equal(reader.unrestrictedBash, false);
+		assert.deepEqual(reader.commandPatterns, []);
+		assert.throws(() => enforceAgentPolicy(reader, "write", {}), PolicyViolation);
+		assert.deepEqual(state.agents.find((agent) => agent.name === "claude-sample-reader")!.omitted, ["tools quitadas por disallowedTools: Write, Bash(git status), mcp__docs__write"]);
+		assert.equal(state.policies.some((policy) => policy.name === "claude-sample-pusher" || policy.name === "claude-sample-wildcard"), false);
+		const reasons = state.agentErrors.map((error) => error.reason);
+		assert.ok(reasons.some((reason) => /Bash\(git push\) no se puede representar con seguridad.*requiere adaptación manual/.test(reason)));
+		assert.ok(reasons.some((reason) => /mcp__docs__\* no se puede representar con seguridad/.test(reason)));
+		assert.equal(existsSync(join(fixture.agentHome, "agents", "claude-sample-pusher.md")), false);
+	} finally { fixture.dispose(); }
+});
+
 test("Bash(pattern) accepts one simple argv and blocks shell syntax it cannot represent", () => {
 	const patterns = ["git status", "git diff *", "npm run test:*"].map((source) => parseCommandPattern(source)!);
 	for (const command of ["git status", "git diff", "git diff --stat src/a.ts", "npm run test", "npm run test --watch=false"]) {
