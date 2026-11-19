@@ -108,6 +108,48 @@ test("/session-context off keeps the context out after compaction and reload unt
 	} finally { paths.dispose(); }
 });
 
+test("/session-context on <id> after a global off restores only that entry, also after compaction and reload", async () => {
+	const paths = workspace();
+	try {
+		writeConfig(paths.configHome, { entries: [{ id: "caveman", text: "Modo cavernícola." }, { id: "rules", text: "Reglas." }] });
+		const { session, sessionManager } = await open(paths);
+		try {
+			await session.prompt("/session-context off");
+			await session.prompt("/session-context on caveman");
+			await session.prompt("Primera.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()), ["Modo cavernícola."], "the re-enabled entry is delivered and the rest stay off");
+			await session.compact();
+			await session.reload();
+			await session.prompt("Tras compactar y recargar.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()), ["Modo cavernícola.", "Modo cavernícola."], "the per-entry override survives compaction and reload");
+			await session.prompt("/session-context off");
+			await session.prompt("/session-context on");
+			await session.prompt("Todo reactivado.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()).at(-1), "Reglas.", "a global toggle resets the per-entry overrides before it");
+		} finally { session.dispose(); }
+	} finally { paths.dispose(); }
+});
+
+test("context owed by a compaction is still delivered when the session reloads before the next prompt", async () => {
+	const paths = workspace();
+	try {
+		writeConfig(paths.configHome, { entries: [{ id: "after-compact", text: "Solo tras compactar.", on: ["compact"] }] });
+		const { session, sessionManager } = await open(paths);
+		try {
+			await session.prompt("Primera.");
+			await session.prompt("Segunda.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()), []);
+			await session.compact();
+			await session.reload();
+			await session.prompt("Tras compactar y recargar.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()), ["Solo tras compactar."]);
+			await session.reload();
+			await session.prompt("Otra recarga.");
+			assert.deepEqual(deliveredBlocks(sessionManager.getBranch()), ["Solo tras compactar."], "a later reload in the same cycle does not repeat it");
+		} finally { session.dispose(); }
+	} finally { paths.dispose(); }
+});
+
 test("enabled: false, children and invalid configuration inject nothing; invalid files are reported with their path", async () => {
 	const paths = workspace();
 	try {

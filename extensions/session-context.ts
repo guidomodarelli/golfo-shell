@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { gentlePiConfigHome } from "../lib/agent-home.ts";
 import { errorDetail } from "../lib/integrations/config-file.ts";
 import { AGENTS_CHILD_ENV, SESSION_CONTEXT, type SessionContextTrigger } from "../lib/integrations/constants.ts";
-import { disabledEntries, entriesToDeliver, isEntryDisabled, loadSessionContextConfig, sessionContextConfigPath, type SessionContextConfig, type SessionContextDetails, type SessionContextToggle, triggerForStart } from "../lib/integrations/session-context.ts";
+import { disabledEntries, entriesToDeliver, isEntryDisabled, loadSessionContextConfig, sessionContextConfigPath, type SessionContextConfig, type SessionContextDetails, type SessionContextToggle, triggersForStart } from "../lib/integrations/session-context.ts";
 import { PendingContext } from "../lib/pending-context.ts";
 
 export interface SessionContextDependencies {
@@ -29,7 +29,8 @@ export function createSessionContextExtension(dependencies: SessionContextDepend
 		const pending = new PendingContext<SessionContextDetails>(SESSION_CONTEXT.MESSAGE_TYPE);
 		let config: SessionContextConfig | undefined;
 		let configError: string | undefined;
-		let cycleTrigger: SessionContextTrigger = "startup";
+		/** Triggers the current cycle carries; `/session-context on` re-queues against them. */
+		let cycleTriggers: SessionContextTrigger[] = ["startup"];
 
 		const reloadConfig = () => {
 			try {
@@ -41,10 +42,10 @@ export function createSessionContextExtension(dependencies: SessionContextDepend
 			}
 		};
 
-		const queue = (ctx: ExtensionContext, trigger: SessionContextTrigger) => {
+		const queue = (ctx: ExtensionContext, triggers: readonly SessionContextTrigger[]) => {
 			if (!config || (child && !config.includeChildren)) return;
 			const queued = new Set(pending.queuedDetails().map((details) => details.id));
-			for (const entry of entriesToDeliver(config, trigger, ctx.sessionManager.getBranch(), queued)) pending.add(entry.text, { id: entry.id });
+			for (const entry of entriesToDeliver(config, triggers, ctx.sessionManager.getBranch(), queued)) pending.add(entry.text, { id: entry.id });
 		};
 
 		pi.on("session_start", (event, ctx) => {
@@ -54,13 +55,13 @@ export function createSessionContextExtension(dependencies: SessionContextDepend
 				ctx.ui.notify(`${configError}. No se inyecta contexto de sesión hasta corregir ${sessionContextConfigPath(configHome)}.`, "warning");
 				return;
 			}
-			cycleTrigger = triggerForStart(event.reason);
-			queue(ctx, cycleTrigger);
+			cycleTriggers = triggersForStart(event.reason, ctx.sessionManager.getBranch());
+			queue(ctx, cycleTriggers);
 		});
 
 		pi.on("session_compact", (_event, ctx) => {
-			cycleTrigger = "compact";
-			queue(ctx, cycleTrigger);
+			cycleTriggers = ["compact"];
+			queue(ctx, cycleTriggers);
 		});
 
 		pi.on("before_agent_start", () => pending.take());
@@ -80,7 +81,7 @@ export function createSessionContextExtension(dependencies: SessionContextDepend
 					pi.appendEntry<SessionContextToggle>(SESSION_CONTEXT.STATE_ENTRY_TYPE, toggle);
 					const state = disabledEntries(ctx.sessionManager.getBranch());
 					pending.retain((details) => !isEntryDisabled(state, details.id));
-					if (!toggle.disabled) queue(ctx, cycleTrigger);
+					if (!toggle.disabled) queue(ctx, cycleTriggers);
 					ctx.ui.notify(`session-context: ${id ?? "todo el contexto"} ${toggle.disabled ? "desactivado" : "reactivado"} en esta sesión${toggle.disabled ? " (también tras compactar o recargar, hasta `/session-context on`)" : ""}`, "info");
 					return;
 				}

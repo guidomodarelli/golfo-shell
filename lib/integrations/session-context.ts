@@ -51,9 +51,14 @@ export function sessionContextConfigPath(configHome: string): string {
 	return join(configHome, SESSION_CONTEXT.CONFIG_FILE);
 }
 
-/** Trigger a `session_start` reason opens a cycle with. */
-export function triggerForStart(reason: SessionStartReason): SessionContextTrigger {
-	return START_REASON_TRIGGER[reason];
+/**
+ * Triggers whose entries the cycle a `session_start` opens must carry. A
+ * reload keeps the current cycle: when a compaction opened it, the entries
+ * configured for `compact` that it has not delivered yet are still owed.
+ */
+export function triggersForStart(reason: SessionStartReason, branch: readonly SessionEntry[]): SessionContextTrigger[] {
+	const trigger = START_REASON_TRIGGER[reason];
+	return reason === "reload" && branch.some((entry) => entry.type === "compaction") ? [trigger, "compact"] : [trigger];
 }
 
 function invalid(detail: string): IntegrationConfigError {
@@ -110,26 +115,36 @@ export function loadSessionContextConfig(configHome: string, home: string = home
 }
 
 /**
+ * Session-wide switch plus per-entry overrides set after it: an override wins
+ * over `all`, so `/session-context on <id>` restores one entry after `off`.
+ */
+export interface DisabledEntriesState {
+	all: boolean;
+	/** Entry id -> disabled, for the entries toggled one by one after the last global toggle. */
+	overrides: ReadonlyMap<string, boolean>;
+}
+
+/**
  * Entries switched off in this session by `/session-context off`, replayed
  * from the session branch so the choice survives reloads and compaction.
+ * A global toggle resets the per-entry overrides that came before it.
  */
-export function disabledEntries(branch: readonly SessionEntry[]): { all: boolean; ids: Set<string> } {
+export function disabledEntries(branch: readonly SessionEntry[]): DisabledEntriesState {
 	let all = false;
-	const ids = new Set<string>();
+	const overrides = new Map<string, boolean>();
 	for (const entry of branch) {
 		if (entry.type !== "custom" || entry.customType !== SESSION_CONTEXT.STATE_ENTRY_TYPE || !isRecord(entry.data)) continue;
 		const toggle = entry.data as unknown as SessionContextToggle;
 		if (typeof toggle.disabled !== "boolean") continue;
-		if (toggle.id === undefined) { all = toggle.disabled; ids.clear(); continue; }
-		if (toggle.disabled) ids.add(toggle.id);
-		else ids.delete(toggle.id);
+		if (toggle.id === undefined) { all = toggle.disabled; overrides.clear(); continue; }
+		overrides.set(toggle.id, toggle.disabled);
 	}
-	return { all, ids };
+	return { all, overrides };
 }
 
 /** Whether an entry is switched off in this session. */
-export function isEntryDisabled(state: { all: boolean; ids: ReadonlySet<string> }, id: string): boolean {
-	return state.all || state.ids.has(id);
+export function isEntryDisabled(state: DisabledEntriesState, id: string): boolean {
+	return state.overrides.get(id) ?? state.all;
 }
 
 /**
@@ -154,12 +169,12 @@ export function deliveredInCycle(branch: readonly SessionEntry[]): Set<string> {
 }
 
 /**
- * Entries to deliver for `trigger`: configured for it, not switched off and not
- * already delivered or queued in this cycle.
+ * Entries to deliver for `triggers`: configured for any of them, not switched
+ * off and not already delivered or queued in this cycle.
  */
-export function entriesToDeliver(config: SessionContextConfig, trigger: SessionContextTrigger, branch: readonly SessionEntry[], queued: ReadonlySet<string>): SessionContextEntry[] {
+export function entriesToDeliver(config: SessionContextConfig, triggers: readonly SessionContextTrigger[], branch: readonly SessionEntry[], queued: ReadonlySet<string>): SessionContextEntry[] {
 	if (!config.enabled) return [];
 	const disabled = disabledEntries(branch);
 	const delivered = deliveredInCycle(branch);
-	return config.entries.filter((entry) => entry.on.includes(trigger) && !isEntryDisabled(disabled, entry.id) && !delivered.has(entry.id) && !queued.has(entry.id));
+	return config.entries.filter((entry) => entry.on.some((trigger) => triggers.includes(trigger)) && !isEntryDisabled(disabled, entry.id) && !delivered.has(entry.id) && !queued.has(entry.id));
 }
