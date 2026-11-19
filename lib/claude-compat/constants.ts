@@ -33,6 +33,12 @@ export const SKILL_NAME_MAX_LENGTH = 64;
 export const SKILL_RESOURCE_DIRECTORIES = ["references", "scripts", "assets"] as const;
 /** Plugin root placeholder Claude Code expands in plugin content (`${CLAUDE_PLUGIN_ROOT}` or `$CLAUDE_PLUGIN_ROOT`); Pi tools never receive it. */
 export const CLAUDE_PLUGIN_ROOT_PLACEHOLDER_PATTERN = /\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT(?![A-Za-z0-9_])/g;
+/**
+ * One `Bash(pattern)` word that names a script of the plugin
+ * (`${CLAUDE_PLUGIN_ROOT}/scripts/run.sh`); group 1 is the path relative to the
+ * plugin root. Only plugin agents resolve it, and only inside that root.
+ */
+export const PLUGIN_SCRIPT_WORD_PATTERN = /^(?:\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT)[\\/](.+)$/;
 /** Skill entry file name. */
 export const SKILL_FILE_NAME = "SKILL.md";
 /** `skillOverrides` value in `~/.claude/settings.json` that keeps a skill out of the import (golfo-shell#6). */
@@ -60,10 +66,7 @@ export const CLAUDE_TOOL_EQUIVALENTS: Readonly<Record<string, string>> = {
 export const CLAUDE_BASH_TOOL = "Bash";
 /** Pi shell tool the importer maps `Bash` and `Bash(pattern)` to. */
 export const PI_BASH_TOOL = "bash";
-/** Prefix of Claude Code and Pi MCP tool names (`mcp__<server>__<tool>`). */
-export const MCP_TOOL_PREFIX = "mcp__";
-/** Separator between the MCP server and tool segments. */
-export const MCP_SEGMENT_SEPARATOR = "__";
+export { MCP_SEGMENT_SEPARATOR, MCP_TOOL_PREFIX } from "../mcp-tool-name.ts";
 /** Grammar of one `tools`/`disallowedTools` entry: `Name` or `Name(rule)`. */
 export const TOOL_DECLARATION_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\(.*\))?$/s;
 /** Grammar of one MCP entry (`mcp__<server>[__<tool>]`); wildcards are judged later. */

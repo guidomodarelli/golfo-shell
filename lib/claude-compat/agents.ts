@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { piMcpToolName } from "../mcp-tool-name.ts";
 import { THINKING_LEVELS } from "../model-routing-authority.ts";
 import { type AgentPolicy, type CommandPattern, parseCommandPattern } from "./agent-policy.ts";
 import { CLAUDE_BASH_TOOL, CLAUDE_TOOL_EQUIVALENTS, FORBIDDEN_PERMISSION_MODES, INHERIT_MODEL, MANAGED_AGENT_PREFIX, MCP_SEGMENT_SEPARATOR, MCP_TOOL_DECLARATION_PATTERN, MCP_TOOL_PREFIX, PARENT_NOTIFICATION_TOOL, PI_BASH_TOOL, POLICY_TOOL_PREFIX, TOOL_DECLARATION_PATTERN } from "./constants.ts";
@@ -39,11 +40,7 @@ function identifierOf(value: string): string {
 	return value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** Pi normalizes MCP server names to `[A-Za-z0-9_]` (`dev-docs` → `dev_docs`). */
-export function piMcpToolName(claudeName: string): string {
-	const [server, ...rest] = claudeName.slice(MCP_TOOL_PREFIX.length).split(MCP_SEGMENT_SEPARATOR);
-	return [`${MCP_TOOL_PREFIX}${server.replace(/[^A-Za-z0-9_]/g, "_")}`, ...rest].join(MCP_SEGMENT_SEPARATOR);
-}
+export { piMcpToolName };
 
 /** Splits a `tools:` value, keeping commas inside `Bash(...)` together. */
 export function splitToolList(value: string): string[] {
@@ -80,8 +77,10 @@ export function parsePermissionList(field: string, value: string): string[] {
 /**
  * Translates declared Claude Code tools into an exact Pi allowlist. Tools
  * without a safe equivalent are reported, never replaced by stronger ones.
+ * `pluginRoot` (agents of a plugin only) lets `Bash(${CLAUDE_PLUGIN_ROOT}/…)`
+ * grant that one script of the plugin.
  */
-export function translateTools(declared: readonly string[]): Pick<AgentPolicy, "tools" | "toolPrefixes" | "unrestrictedBash" | "commandPatterns" | "unsupported"> {
+export function translateTools(declared: readonly string[], pluginRoot?: string): Pick<AgentPolicy, "tools" | "toolPrefixes" | "unrestrictedBash" | "commandPatterns" | "unsupported"> {
 	const tools = new Set<string>();
 	const toolPrefixes = new Set<string>();
 	const commandPatterns: CommandPattern[] = [];
@@ -90,7 +89,7 @@ export function translateTools(declared: readonly string[]): Pick<AgentPolicy, "
 	for (const tool of declared) {
 		const restricted = /^Bash\((.*)\)$/s.exec(tool);
 		if (restricted) {
-			const pattern = parseCommandPattern(restricted[1]);
+			const pattern = parseCommandPattern(restricted[1], pluginRoot);
 			if (pattern) { commandPatterns.push(pattern); tools.add(PI_BASH_TOOL); } else unsupported.push(tool);
 			continue;
 		}
@@ -164,13 +163,18 @@ function deniedPiToolOf(rule: string): string | undefined {
 	return baseName === CLAUDE_BASH_TOOL ? PI_BASH_TOOL : CLAUDE_TOOL_EQUIVALENTS[baseName];
 }
 
+/** A granted `Bash(pattern)` as the child must type it: plugin scripts appear with their resolved path. */
+function grantedCommand(pattern: CommandPattern): string {
+	return pattern.scripts ? `Bash(${pattern.words.join(" ")}${pattern.prefix ? " *" : ""})` : `Bash(${pattern.source})`;
+}
+
 function compatibilityNotice(owner: string, sourceName: string, root: string, policy: AgentPolicy, omitted: readonly string[]): string {
 	return [
 		"## Contrato de compatibilidad Pi (claude-compat)",
 		`Origen: ${owner}:${sourceName}. Directorio de recursos: ${root.replaceAll("\\", "/")}.`,
 		"Las herramientas permitidas se validan en cada tool_call, incluidas llamadas anidadas, MCP y delegación. No hay bypassPermissions ni aprobación implícita.",
 		"Read/Write/Edit/Grep/Glob/LS corresponden a read/write/edit/grep/find/ls. Skill carga SKILL.md con read; ToolSearch corresponde a tool_search.",
-		...(policy.commandPatterns.length > 0 ? [`Bash está restringido a: ${policy.commandPatterns.map((pattern) => `Bash(${pattern.source})`).join("; ")}. Sin comillas, operadores, redirecciones ni expansiones: dividir operaciones o informar la limitación al parent.`] : []),
+		...(policy.commandPatterns.length > 0 ? [`Bash está restringido a: ${policy.commandPatterns.map(grantedCommand).join("; ")}. Sin comillas, operadores, redirecciones ni expansiones: dividir operaciones o informar la limitación al parent.`] : []),
 		...(policy.unsupported.length > 0 ? [`Capacidades sin equivalente seguro (NO disponibles): ${policy.unsupported.join(", ")}. Si son imprescindibles, devolver el bloqueo al parent; nunca rodear la restricción con otra herramienta.`] : []),
 		...(omitted.length > 0 ? [`Campos de Claude Code no importados: ${omitted.join(", ")}.`] : []),
 		"Si el modelo declarado no tiene proveedor o autenticación compatible, fallar y reportarlo; no cambiar a otro modelo.",
@@ -191,7 +195,7 @@ export function convertAgent(source: AgentSource, agentHome: string, previous: M
 	const marker = `${POLICY_TOOL_PREFIX}${identifier.replaceAll("-", "_").toLowerCase()}`;
 	if (reservedMarkers.has(marker)) throw new Error(`marker de política ${marker} ya usado por otro agente (nombres que solo difieren en '-', '_' o mayúsculas); se conserva la primera versión`);
 	const { allowed, removed } = applyDisallowedTools(parsePermissionList("tools", fields.tools), parsePermissionList("disallowedTools", fields.disallowedTools ?? ""));
-	const translated = translateTools(allowed);
+	const translated = translateTools(allowed, source.owner === USER_AGENT_OWNER ? undefined : source.root);
 	const policy: AgentPolicy = { name, marker, ...translated, tools: [...translated.tools, marker, PARENT_NOTIFICATION_TOOL], source: source.file };
 	const omitted: string[] = [];
 	if (removed.length > 0) omitted.push(`tools quitadas por disallowedTools: ${removed.join(", ")}`);

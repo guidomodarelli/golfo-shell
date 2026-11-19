@@ -61,6 +61,21 @@ Una entrada de `skillOverrides` en `~/.claude/settings.json` con valor exacto `"
 
 `Bash(git status)`, `Bash(git diff *)` y `Bash(npm run test:*)` usan el `bash` nativo de Pi (con sus controles y consentimientos), después de validar que la orden sea **un único argv** sin comillas, operadores, redirecciones ni expansiones, y que coincida con el patrón. Patrones que no se pueden representar así (`Bash(git log | head)`) se reportan y no conceden shell. `Bash` sin patrón conserva el shell irrestricto de la definición original: el guard no es un sandbox del sistema operativo.
 
+### Scripts del plugin en `Bash(pattern)`
+
+En agentes de plugins, una palabra `${CLAUDE_PLUGIN_ROOT}/…` (o `$CLAUDE_PLUGIN_ROOT/…`) se resuelve al sincronizar a la ruta absoluta del script, con barras `/`, la misma que el agente ve en sus instrucciones:
+
+```text
+tools: Read, Bash(${CLAUDE_PLUGIN_ROOT}/scripts/deploy.sh *)
+→ el child puede ejecutar  <raíz-del-plugin>/scripts/deploy.sh staging --dry-run
+```
+
+- El script debe existir, ser un archivo regular y quedar **dentro de la raíz del plugin** después de seguir symlinks y junctions; `..`, rutas que salen de la raíz o scripts ausentes dejan el patrón como capacidad no soportada.
+- La contención se vuelve a comprobar en **cada** llamada: si después de importar el script o su directorio pasan a apuntar fuera del plugin, o el script desaparece, la llamada se bloquea hasta restaurarlo y sincronizar.
+- Los argumentos siguen la gramática restringida: comillas, espacios dentro de un argumento, `;`, `$(…)` o redirecciones se **rechazan**, nunca se reinterpretan ni se reescriben. Otra forma de escribir la ruta (`scripts/../scripts/deploy.sh`) no es el script concedido.
+- Una raíz de plugin con caracteres fuera de esa gramática (por ejemplo espacios en la ruta del home) no se puede conceder así y se reporta.
+- Solo resuelve la ruta: no amplía la allowlist, no omite el consentimiento de `bash` y no habilita `updatedInput`. Los agentes de `~/.claude/agents` no tienen raíz de plugin, así que el placeholder sigue sin soporte allí.
+
 ### Fallo cerrado
 
 El guard se registra antes de leer el estado. Si `state.json` es ilegible o la política no existe, el child de un agente importado se bloquea. Si un child carga solo el fallback curado de extensiones (sin `claude-compat`), `child-safety` bloquea a los agentes importados.
@@ -102,6 +117,10 @@ El informe separa:
 - **Capacidades pendientes**: todo lo demás, incluidos los hooks de `settings.json` (comandos arbitrarios). No se ejecutan.
 
 Para reactivar un equivalente nativo por defecto, poner su motivo vacío: `"nativeEquivalents": { "engram": "" }`.
+
+## Integraciones opcionales
+
+Contexto declarativo de sesión, señales de sesión y protección de escrituras de memoria **no** son parte del puente: viven en extensiones propias, cada una con su archivo de configuración y sin efecto si ese archivo no existe. Ver [Integraciones opcionales](optional-integrations.md).
 
 ## Límites
 

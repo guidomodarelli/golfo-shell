@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionContext, ToolCallEventResult } from "@earen
 import { Type } from "typebox";
 import { gentlePiConfigHome, resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { CHILD_SKILLS_CATALOG_ENV, REQUESTED_TOOLS_ENV } from "../lib/agents-runner.ts";
+import { PendingContext } from "../lib/pending-context.ts";
 import { loadClaudeCompatConfig } from "../lib/claude-compat/config.ts";
 import { enforceAgentPolicy, PolicyViolation, resolveChildPolicy } from "../lib/claude-compat/agent-policy.ts";
 import { HOOK_CONTEXT_MESSAGE_TYPE, HOOK_EVENT, STATUS_COMMAND, SYNC_COMMAND } from "../lib/claude-compat/constants.ts";
@@ -69,7 +70,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 		let loadError: string | undefined;
 		let unreadableStateGuards: ResolvedHook[] = [];
 		let blockAllReason: string | undefined;
-		let pendingContext: string[] = [];
+		const pendingContext = new PendingContext(HOOK_CONTEXT_MESSAGE_TYPE);
 
 		pi.on("tool_call", async (event, ctx) => {
 			const input = (event.input ?? {}) as Record<string, unknown>;
@@ -144,7 +145,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			for (const hook of hooksFor(state, HOOK_EVENT.SESSION_START)) {
 				try {
 					const decision = await callReviewedHook(hook, { ...hookPayload(HOOK_EVENT.SESSION_START, { cwd: ctx.cwd, sessionId: sessionIdOf(ctx) }), source }, { cwd: ctx.cwd });
-					if (decision.action === "continue" && decision.context) pendingContext.push(decision.context);
+					if (decision.action === "continue" && decision.context) pendingContext.add(decision.context);
 				} catch (error) {
 					ctx.ui.notify(`claude-compat: el hook ${hook.id} no aportó contexto (${error instanceof Error ? error.message : String(error)})`, "warning");
 				}
@@ -152,7 +153,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 		};
 
 		pi.on("session_start", async (event, ctx) => {
-			pendingContext = [];
+			pendingContext.reset();
 			if (loadError) ctx.ui.notify(`claude-compat: importación ilegible; los agentes importados${blockAllReason ? " y todas las herramientas" : unreadableStateGuards.length > 0 ? " y las herramientas que cubren los guards configurados" : ""} quedan bloqueados hasta corregirla. ${loadError}`, "warning");
 			await collectContext(ctx, event.reason === "new" ? "clear" : event.reason);
 		});
@@ -161,12 +162,7 @@ export function createClaudeCompatExtension(dependencies: ClaudeCompatDependenci
 			await collectContext(ctx, "compact");
 		});
 
-		pi.on("before_agent_start", () => {
-			if (pendingContext.length === 0) return undefined;
-			const content = pendingContext.join("\n\n");
-			pendingContext = [];
-			return { message: { customType: HOOK_CONTEXT_MESSAGE_TYPE, content, display: false } };
-		});
+		pi.on("before_agent_start", () => pendingContext.take());
 
 		pi.on("tool_result", async (event, ctx) => {
 			if (event.isError) return undefined;
